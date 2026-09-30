@@ -16,6 +16,68 @@ uv run python main.py
 The three checkpoints (`english`, `multilingual`, `typed-decisions`) are
 downloaded from Hugging Face on first use and cached in `~/.cache/huggingface`.
 
+## Sensor anomaly detection
+
+`sensor_anomaly_detection.py` is a standalone, stdlib-only script (no laya
+dependency, nothing new to install) that demonstrates statistical anomaly
+detection on synthetic sensor data:
+
+```sh
+uv run python sensor_anomaly_detection.py
+```
+
+### What it does
+
+1. Generates a deterministic temperature + humidity feed (500 samples each,
+   5-minute interval, periodic signal + Gaussian noise, `SEED=42`) and injects
+   known faults: spike, out-of-range, flatline (stuck sensor), and transient
+   drift (ramp up + ramp down).
+2. Runs six detectors and merges their flags per reading:
+   - `range` — raw value outside the sensor's physical limits
+   - `global_z` / `rolling_z` — z-score vs whole series / trailing window, on
+     detrended residuals (reading minus the expected periodic signal)
+   - `rate` — jump between consecutive readings over the rate limit
+   - `flatline` — N consecutive identical readings
+   - `level_shift` — median of a trailing window vs the preceding window
+     (catches drift; medians keep a single spike from masquerading as a shift)
+3. Prints flagged readings (severity = number of agreeing detectors) and
+   precision/recall against the injected ground truth.
+
+### Results (SEED=42)
+
+| Sensor       | Precision | Recall | Notes                                            |
+| ------------ | --------- | ------ | ------------------------------------------------ |
+| temperature  | 80%       | 100%   | spike and out-of-range fully caught              |
+| humidity     | 89%       | 70%    | flatline 100%; drift caught ~2/3 through its ramp |
+
+Slow ramps are the hardest shape for windowed statistics: a trailing-window
+z-score mathematically caps at √12/2 ≈ 1.73σ on any linear ramp (the slope
+cancels), which is why drift needs the dedicated level-shift detector — and
+even then it only fires once ~14 of its last 20 samples are inside the ramp.
+The residual false positives are statistical noise tails plus documented
+"settling" flags while window detectors clear an anomaly's aftermath.
+
+### Raising precision
+
+Three levers, most effective first:
+
+1. **Require detector agreement** — keep only readings flagged by ≥2 detectors
+   (`if len(methods) >= MIN_AGREEING_DETECTORS`). On this data all false
+   positives are single-detector flags.
+2. **Raise thresholds** (`Z_THRESHOLD`, `LEVEL_SHIFT_THRESHOLD`) — fewer false
+   alarms, more missed events.
+3. **Confirm-before-alert** — require 2–3 consecutive flags before alerting
+   (the usual pattern for live streams).
+
+### Note on laya / Jev
+
+This script deliberately does **not** use laya: its checkpoints are trained on
+support-ticket text, so numeric sensor data is out-of-domain. The sensible
+architecture is statistics for detection and a System One model (laya, or
+TypeSafe AI's frontier [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev))
+as a downstream judgment layer — feeding detector evidence as state and asking
+typed questions (fault type = choice, urgency = score, needs-maintenance = yes-no).
+
 ## Startup performance
 
 Stock `laya` + `Router(preload=True)` spent ~100s before the first prediction on

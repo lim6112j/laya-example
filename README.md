@@ -72,6 +72,24 @@ independent of laya — physics never lets robots overlap; laya decides
 strategy. Toggle autoplay off to watch blocked robots stop forever: the
 deadlock laya prevents.
 
+### laya dispatches the bus fleet
+
+`static/fleet.html` (linked from the UI header) simulates an autonomous bus
+fleet on a 50×50 grid: passengers appear with a pickup and a destination, and
+every new demand is dispatched by laya —
+`assign: choice(bus_a/bus_b/bus_c)`. The prose state spells out the demand,
+each bus's position/job phase/queue, and a ranked recommendation (closest bus
+by estimated blocks first); laya arbitrates — it usually confirms the
+recommendation and sometimes overrides it (flagged in the history), since
+pure numeric ranking of three peers is outside the checkpoints' System-1
+training. Buses drive Manhattan-style to the pickup, carry the passenger to
+the destination and loop for queued jobs. The screen shows the grid with
+buses, waiting passengers and destination markers, per-bus status chips,
+"Laya's view" (the dispatch state sent) and "Laya's decisions" (assignment
+bars, confidence, latency, history). Toggle laya dispatch off to compare
+against a greedy nearest-bus heuristic; sliders tune demand frequency and bus
+speed.
+
 ## Sensor anomaly detection
 
 `sensor_anomaly_detection.py` is a standalone, stdlib-only script (no laya

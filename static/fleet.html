@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>laya dispatches the bus fleet</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --border: #d9dde3; --text: #1c2128;
+    --muted: #6b7280; --accent: #4f46e5; --accent-soft: #eef2ff;
+    --danger: #b91c1c; --danger-bg: #fef2f2; --ok: #047857;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header { padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { margin: 0; font-size: 17px; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  header a { color: var(--accent); text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+  main {
+    display: grid; grid-template-columns: minmax(440px, 6fr) minmax(340px, 5fr);
+    gap: 20px; padding: 20px 24px; max-width: 1240px; margin: 0 auto;
+  }
+  @media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--muted); }
+  canvas { display: block; width: 100%; background: #111827; border-radius: 8px; }
+  .hud { display: flex; justify-content: space-between; color: var(--muted);
+    font-size: 13px; margin-bottom: 8px; }
+  .hud strong { color: var(--text); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); font-weight: 600;
+    font-size: 12px; visibility: hidden; }
+  .badge.on { visibility: visible; }
+  .chips { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .chip { padding: 3px 10px; border-radius: 999px; font-size: 12px;
+    border: 1px solid var(--border); color: var(--muted); background: #fff; }
+  .chip.busy { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+  .controls label { color: var(--muted); font-size: 13px; }
+  .controls .ctl { display: flex; align-items: center; gap: 6px; }
+  button, select {
+    font: inherit; border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 12px; background: #fff; cursor: pointer; color: var(--text);
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent);
+    color: #fff; font-weight: 600; }
+  button.primary:hover { opacity: 0.9; color: #fff; }
+  input[type="range"] { accent-color: var(--accent); }
+  .bar { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+  .bar .bar-label { flex: 0 0 52px; color: var(--muted); font-size: 12px; }
+  .bar .bar-track { flex: 1; height: 10px; background: var(--accent-soft);
+    border-radius: 5px; overflow: hidden; }
+  .bar .bar-fill { height: 100%; background: var(--accent); border-radius: 5px;
+    transition: width 120ms; }
+  .bar.winner .bar-label { color: var(--text); font-weight: 600; }
+  .bar.winner .bar-fill { background: var(--ok); }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  #whoAsked { font-weight: 600; color: var(--accent); margin-bottom: 6px; display: block; }
+  #stateView { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; background: #f3f4f6; border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px; white-space: pre-wrap; word-break: break-word;
+    min-height: 110px; color: #374151; }
+  #history { font-size: 12px; color: var(--muted); margin-top: 8px;
+    max-height: 160px; overflow-y: auto; }
+  #history div { padding: 2px 0; border-bottom: 1px dashed var(--border); }
+  #history .bus-a { color: var(--danger); font-weight: 600; }
+  #history .bus-b { color: var(--ok); font-weight: 600; }
+  #history .bus-c { color: #2563eb; font-weight: 600; }
+  .banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 12px;
+    display: none; white-space: pre-wrap; }
+  .banner.error { display: block; background: var(--danger-bg);
+    color: var(--danger); border: 1px solid #fecaca; }
+</style>
+</head>
+<body>
+<header>
+  <h1>laya dispatches the bus fleet 🚌</h1>
+  <p>50×50 grid, three autonomous buses. Every new passenger demand goes to laya:
+     <code>assign: choice(bus_a/bus_b/bus_c)</code> — distance, load and queue all in prose.
+     Dispatch off = greedy nearest-bus heuristic. <a href="/">← back to the main UI</a></p>
+</header>
+<main>
+  <section>
+    <div class="panel">
+      <div class="hud">
+        <span>Waiting <strong id="waiting">0</strong></span>
+        <span>Riding <strong id="riding">0</strong></span>
+        <span>Delivered <strong id="delivered">0</strong></span>
+        <span>Demands <strong id="demands">0</strong></span>
+        <span class="badge" id="autoplayBadge">LAYA IS DISPATCHING</span>
+      </div>
+      <canvas id="sim" width="500" height="500"></canvas>
+      <div class="chips">
+        <span class="chip" id="chip-A">Bus A · —</span>
+        <span class="chip" id="chip-B">Bus B · —</span>
+        <span class="chip" id="chip-C">Bus C · —</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Controls</h2>
+      <div class="controls">
+        <button id="startBtn" class="primary">Start / Restart</button>
+        <button id="pauseBtn">Pause</button>
+        <span class="ctl"><input type="checkbox" id="autoplay" checked>
+          <label for="autoplay">Laya dispatch <span style="color:var(--muted)">(off = greedy nearest-bus)</span></label></span>
+        <span class="ctl"><label>Model</label>
+          <select id="model">
+            <option value="auto">auto</option>
+            <option value="english">english</option>
+            <option value="typed-decisions">typed-decisions</option>
+          </select></span>
+        <span class="ctl"><label>New demand every</label>
+          <input type="range" id="demandEvery" min="3" max="10" step="1" value="5">
+          <label id="demandEveryLabel">5 s</label></span>
+        <span class="ctl"><label>Bus speed</label>
+          <input type="range" id="speed" min="8" max="25" step="1" value="14">
+          <label id="speedLabel">14 cells/s</label></span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div id="banner" class="banner"></div>
+    <div class="panel">
+      <h2>Laya's view — the dispatch state it receives</h2>
+      <span id="whoAsked"></span>
+      <div id="stateView">not started yet</div>
+    </div>
+    <div class="panel">
+      <h2>Laya's decisions — which bus takes the demand</h2>
+      <div id="decisionBars"></div>
+      <div class="meta" id="decisionMeta">no assignments yet</div>
+      <div id="history"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+// ---- fixed map geometry -----------------------------------------------------
+
+const GRID = 50;
+const CELL = 10;                       // 50 x 50 cells at 10 px = 500 px canvas
+const W = GRID * CELL, H = GRID * CELL;
+const DEMAND_PACE_MS = 600;            // passengers appear staggered inside the map
+
+const BUSES = {
+  A: { label: "Bus A", color: "#f87171", css: "bus-a", start: { x: 10, y: 40 } },
+  B: { label: "Bus B", color: "#4ade80", css: "bus-b", start: { x: 40, y: 10 } },
+  C: { label: "Bus C", color: "#60a5fa", css: "bus-c", start: { x: 25, y: 25 } },
+};
+
+const manhattan = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+const cellText = c => `grid (${c.x}, ${c.y})`;
+// buses carry x/y as numbers; wrap them as a point for distance helpers
+const busPos = bus => ({ x: bus.x, y: bus.y });
+
+function randomCell() {
+  return { x: 1 + Math.floor(Math.random() * (GRID - 2)),
+           y: 1 + Math.floor(Math.random() * (GRID - 2)) };
+}
+
+// ---- simulation state -------------------------------------------------------
+
+const canvas = document.getElementById("sim");
+const ctx = canvas.getContext("2d");
+
+let buses = [], passengers = [], demandCount = 0, deliveredCount = 0;
+let running = false, paused = false, lastTime = 0, demandTimer = null;
+
+function speed() { return Number(document.getElementById("speed").value); }
+
+function makeBus(id) {
+  const spec = BUSES[id];
+  return {
+    id, label: spec.label, color: spec.color, css: spec.css,
+    x: spec.start.x, y: spec.start.y,
+    job: null,            // {phase: "to_pickup"|"to_dest", passenger}
+    queue: [],            // passengers waiting for this bus to become free
+    asking: false,
+  };
+}
+
+function newDemand() {
+  demandCount++;
+  const pickup = randomCell();
+  let dest = randomCell();
+  while (manhattan(pickup, dest) < 8) dest = randomCell();
+  const passenger = { id: demandCount, pickup, dest, state: "waiting", bus: null };
+  passengers.push(passenger);
+  dispatch(passenger);
+}
+
+// ---- dispatch ---------------------------------------------------------------
+
+const QUESTION = {
+  type: "choice",
+  instructions: "You are the dispatcher of an autonomous bus fleet. A new passenger demand just arrived. Which bus should serve it?",
+  criteria: {
+    bus_a: "assign to Bus A (red)",
+    bus_b: "assign to Bus B (green)",
+    bus_c: "assign to Bus C (blue)",
+  },
+};
+
+function describeBus(bus, pickup) {
+  return busText(bus, pickup);
+}
+
+function busText(bus, pickup) {
+  const at = `at ${cellText({ x: Math.round(bus.x), y: Math.round(bus.y) })}`;
+  if (bus.job === null && bus.queue.length === 0) {
+    return `${bus.label} (idle, empty) is ${at}, ${Math.round(manhattan(busPos(bus), pickup))} blocks from the pickup, no jobs queued.`;
+  }
+  if (bus.job && bus.job.phase === "to_dest") {
+    const p = bus.job.passenger;
+    const remain = Math.round(manhattan(busPos(bus), p.dest));
+    const afterDrop = remain + Math.round(manhattan(p.dest, pickup));
+    return `${bus.label} (carrying a passenger) will drop off at ${cellText(p.dest)} in ${remain} blocks, ` +
+      `then is ${afterDrop} blocks from the new pickup, ${bus.queue.length} jobs already queued.`;
+  }
+  if (bus.job && bus.job.phase === "to_pickup") {
+    const p = bus.job.passenger;
+    const remain = Math.round(manhattan(busPos(bus), p.pickup));
+    const afterTrip = remain + Math.round(manhattan(p.pickup, p.dest)) + Math.round(manhattan(p.dest, pickup));
+    return `${bus.label} (empty, driving to a pickup at ${cellText(p.pickup)}) is ${remain} blocks from it, ` +
+      `then ${afterTrip} blocks from the new pickup, ${bus.queue.length} jobs already queued.`;
+  }
+  const first = bus.queue[0];
+  const remain = Math.round(manhattan(busPos(bus), first.pickup));
+  return `${bus.label} (empty, ${bus.queue.length} jobs queued) will reach its first pickup at ${cellText(first.pickup)} in ${remain} blocks, ` +
+    `then is ${remain + Math.round(manhattan(first.pickup, first.dest)) + Math.round(manhattan(first.dest, pickup))} blocks from the new pickup.`;
+}
+
+function buildState(passenger) {
+  const ranked = rankedBuses(passenger);
+  const [best, second] = ranked;
+  return {
+    demand: `A new passenger request arrived at ${cellText(passenger.pickup)} and wants to go to ` +
+      `${cellText(passenger.dest)}, a ${manhattan(passenger.pickup, passenger.dest)}-block ride.`,
+    fleet: ranked.map(bus => busText(bus, passenger.pickup)).join(" "),
+    recommendation: `${best.label} looks best placed for this demand: ` +
+      `${Math.round(costOf(best, passenger.pickup))} blocks away (estimated, via its current job and queue); ` +
+      `${second.label} would need ${Math.round(costOf(second, passenger.pickup))} blocks. ` +
+      `You may follow the recommendation or override it if the situation warrants.`,
+    backlog: `${passengers.filter(p => p.state === "waiting").length} passengers waiting, ` +
+      `${deliveredCount} delivered so far`,
+  };
+}
+
+// greedy baseline: nearest bus by estimated total path, ignoring queue length
+// estimated total blocks for this bus to reach the new pickup
+function costOf(bus, pickup) {
+  if (bus.job && bus.job.phase === "to_dest") {
+    const p = bus.job.passenger;
+    return manhattan(busPos(bus), p.dest) + manhattan(p.dest, pickup);
+  }
+  if (bus.job && bus.job.phase === "to_pickup") {
+    const p = bus.job.passenger;
+    return manhattan(busPos(bus), p.pickup) + manhattan(p.pickup, p.dest) +
+      manhattan(p.dest, pickup);
+  }
+  if (bus.queue.length) {
+    const first = bus.queue[0];
+    return manhattan(busPos(bus), first.pickup) + manhattan(first.pickup, first.dest) +
+      manhattan(first.dest, pickup);
+  }
+  return manhattan(busPos(bus), pickup);
+}
+
+function rankedBuses(passenger) {
+  return [...buses].sort((a, b) => costOf(a, passenger.pickup) - costOf(b, passenger.pickup));
+}
+
+function greedyAssign(passenger) {
+  return rankedBuses(passenger)[0];
+}
+
+async function dispatch(passenger) {
+  const useLaya = document.getElementById("autoplay").checked;
+  if (useLaya) {
+    const bus = await askLaya(passenger);
+    if (bus) { assignTo(bus, passenger); return; }
+    // laya failed (error path) -> keep the fleet running with the heuristic
+  }
+  assignTo(greedyAssign(passenger), passenger);
+}
+
+function assignTo(bus, passenger) {
+  if (!bus) return;
+  passenger.bus = bus.id;
+  passenger.state = "assigned";
+  bus.queue.push(passenger);
+  updateChips();
+}
+
+async function askLaya(passenger) {
+  const state = buildState(passenger);
+  document.getElementById("whoAsked").textContent = `Demand #${passenger.id} asked:`;
+  document.getElementById("stateView").textContent = JSON.stringify(state, null, 2);
+  try {
+    const response = await fetch("/api/predict", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        state,
+        questions: { assign: QUESTION },
+        model: document.getElementById("model").value,
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      showError(`Dispatch failed (${response.status}): ${detail}`);
+      return null;
+    }
+    const answer = body.result.answers.assign;
+    const choice = answer.choice;                      // "bus_a" | "bus_b" | "bus_c"
+    const bus = buses.find(b => choice === `bus_${b.id.toLowerCase()}`);
+    if (!bus) return null;
+    const recommended = rankedBuses(passenger)[0];
+    renderDecision(passenger, bus, recommended, answer.probabilities || {},
+      answer.confidence, body.latency_ms);
+    return bus;
+  } catch (err) {
+    showError("Dispatch failed: " + err.message);
+    return null;
+  }
+}
+
+const ASSIGNMENTS = ["bus_a", "bus_b", "bus_c"];
+
+function renderDecision(passenger, bus, recommended, probs, confidence, latency) {
+  const bars = document.getElementById("decisionBars");
+  bars.innerHTML = "";
+  for (const label of ASSIGNMENTS) {
+    const value = probs[label] || 0;
+    const pct = (value * 100).toFixed(1);
+    const row = document.createElement("div");
+    row.className = "bar" + (label === `bus_${bus.id.toLowerCase()}` ? " winner" : "");
+    row.innerHTML =
+      `<div class="bar-label">${BUSES[label.slice(4).toUpperCase()].label}</div>` +
+      `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>` +
+      `<div class="bar-label">${pct}%${label === `bus_${bus.id.toLowerCase()}` ? " ← laya" : ""}</div>`;
+    bars.appendChild(row);
+  }
+  document.getElementById("decisionMeta").textContent =
+    `demand #${passenger.id} · confidence ${confidence} · latency ${latency} ms`;
+
+  const history = document.getElementById("history");
+  const entry = document.createElement("div");
+  const override = bus.id !== recommended.id ? " · <em>override</em>" : "";
+  entry.innerHTML = `<span class="${bus.css}">demand #${passenger.id} → ${bus.label}</span>` +
+    ` (${((probs[`bus_${bus.id.toLowerCase()}`] || 0) * 100).toFixed(0)}%) · ` +
+    `pickup ${cellText(passenger.pickup)}${override} · ${new Date().toLocaleTimeString()}`;
+  history.prepend(entry);
+  while (history.children.length > 12) history.lastChild.remove();
+}
+
+function showError(message) {
+  const banner = document.getElementById("banner");
+  banner.textContent = message;
+  banner.className = message ? "banner error" : "banner";
+}
+
+// ---- physics -----------------------------------------------------------------
+
+function step(dt) {
+  if (!running || paused) return;
+
+  // demand spawner
+  if (demandTimer === null) demandTimer = 0;
+  demandTimer += dt * 1000;
+  const pace = Number(document.getElementById("demandEvery").value) * 1000;
+  if (demandTimer >= pace) {
+    demandTimer = 0;
+    newDemand();
+  }
+
+  for (const bus of buses) {
+    // take the next queued job when free
+    if (!bus.job && bus.queue.length) {
+      bus.job = { phase: "to_pickup", passenger: bus.queue.shift() };
+    }
+    const target = bus.job
+      ? (bus.job.phase === "to_pickup" ? bus.job.passenger.pickup : bus.job.passenger.dest)
+      : null;
+    if (target) {
+      // axis-by-axis Manhattan stepping
+      if (bus.x !== target.x) {
+        bus.x += Math.sign(target.x - bus.x) * Math.min(speed() * dt, Math.abs(target.x - bus.x));
+      } else if (bus.y !== target.y) {
+        bus.y += Math.sign(target.y - bus.y) * Math.min(speed() * dt, Math.abs(target.y - bus.y));
+      }
+      if (bus.x === target.x && bus.y === target.y) {
+        if (bus.job.phase === "to_pickup") {
+          bus.job.phase = "to_dest";
+          bus.job.passenger.state = "riding";
+        } else {
+          bus.job.passenger.state = "delivered";
+          deliveredCount++;
+          bus.job = null;
+        }
+      }
+    }
+  }
+
+  updateHud();
+  updateChips();
+}
+
+function busChipText(bus) {
+  if (bus.job && bus.job.phase === "to_pickup") {
+    return `${bus.label} · to pickup (${Math.round(manhattan(busPos(bus), bus.job.passenger.pickup))} blocks)`;
+  }
+  if (bus.job && bus.job.phase === "to_dest") {
+    return `${bus.label} · carrying → ${cellText(bus.job.passenger.dest)} (${Math.round(manhattan(busPos(bus), bus.job.passenger.dest))} blocks)`;
+  }
+  if (bus.queue.length) return `${bus.label} · queue ${bus.queue.length}`;
+  return `${bus.label} · idle`;
+}
+
+function updateChips() {
+  for (const bus of buses) {
+    const chip = document.getElementById(`chip-${bus.id}`);
+    const text = busChipText(bus);
+    chip.textContent = text;
+    chip.className = "chip" + (text.includes("idle") ? "" : " busy");
+  }
+}
+
+function updateHud() {
+  document.getElementById("waiting").textContent =
+    passengers.filter(p => p.state === "waiting" || p.state === "assigned").length;
+  document.getElementById("riding").textContent =
+    passengers.filter(p => p.state === "riding").length;
+  document.getElementById("delivered").textContent = deliveredCount;
+  document.getElementById("demands").textContent = demandCount;
+}
+
+// ---- rendering ---------------------------------------------------------------
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // grid lines
+  ctx.strokeStyle = "rgba(148, 163, 184, 0.12)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i <= GRID; i++) {
+    ctx.moveTo(i * CELL, 0); ctx.lineTo(i * CELL, H);
+    ctx.moveTo(0, i * CELL); ctx.lineTo(W, i * CELL);
+  }
+  ctx.stroke();
+
+  // passengers: waiting (dot + destination ring), assigned (ring + bus color)
+  for (const p of passengers) {
+    if (p.state === "delivered") continue;
+    const px = p.pickup.x * CELL + CELL / 2, py = p.pickup.y * CELL + CELL / 2;
+    // destination marker
+    ctx.strokeStyle = "rgba(229, 231, 235, 0.5)";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(p.dest.x * CELL + 2, p.dest.y * CELL + 2, CELL - 4, CELL - 4);
+    const color = p.bus ? BUSES[p.bus].color : "#e5e7eb";
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(px, py, 4, 0, Math.PI * 2);
+    ctx.fill();
+    // link line pickup -> destination while assigned/riding
+    if (p.bus) {
+      ctx.strokeStyle = color + "55";
+      ctx.setLineDash([2, 4]);
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(p.dest.x * CELL + CELL / 2, p.dest.y * CELL + CELL / 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // buses
+  for (const bus of buses) {
+    const bx = bus.x * CELL + CELL / 2, by = bus.y * CELL + CELL / 2;
+    ctx.fillStyle = bus.color;
+    ctx.fillRect(bx - 6, by - 5, 12, 10);
+    ctx.strokeStyle = "#111827";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(bx - 6, by - 5, 12, 10);
+    ctx.fillStyle = "#e5e7eb";
+    ctx.font = "9px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(bus.id, bx, by - 9);
+  }
+
+  if (!running) {
+    ctx.fillStyle = "rgba(229, 231, 235, 0.9)";
+    ctx.font = "16px sans-serif";
+    ctx.fillText("press Start / Restart", W / 2, H / 2);
+  }
+  if (running && paused) {
+    ctx.fillStyle = "rgba(229, 231, 235, 0.9)";
+    ctx.font = "16px sans-serif";
+    ctx.fillText("paused", W / 2, H / 2);
+  }
+}
+
+function frame(t) {
+  const dt = Math.min((t - lastTime) / 1000, 0.05);
+  lastTime = t;
+  step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// ---- wiring -------------------------------------------------------------------
+
+function startSim() {
+  buses = [makeBus("A"), makeBus("B"), makeBus("C")];
+  passengers = [];
+  demandCount = 0; deliveredCount = 0;
+  demandTimer = null;
+  running = true; paused = false;
+  document.getElementById("pauseBtn").textContent = "Pause";
+  document.getElementById("history").innerHTML = "";
+  document.getElementById("decisionBars").innerHTML = "";
+  document.getElementById("decisionMeta").textContent = "no assignments yet";
+  document.getElementById("whoAsked").textContent = "";
+  document.getElementById("stateView").textContent = "waiting for the first demand…";
+  showError("");
+  updateAutoplayBadge();
+  updateHud();
+  updateChips();
+  // two initial demands so the fleet starts working immediately
+  newDemand();
+  newDemand();
+}
+
+function updateAutoplayBadge() {
+  document.getElementById("autoplayBadge").className =
+    "badge" + (document.getElementById("autoplay").checked && running ? " on" : "");
+}
+
+document.getElementById("startBtn").addEventListener("click", startSim);
+document.getElementById("pauseBtn").addEventListener("click", function () {
+  paused = !paused;
+  this.textContent = paused ? "Resume" : "Pause";
+});
+document.getElementById("autoplay").addEventListener("change", updateAutoplayBadge);
+document.getElementById("demandEvery").addEventListener("input", function () {
+  document.getElementById("demandEveryLabel").textContent = `${this.value} s`;
+});
+document.getElementById("speed").addEventListener("input", function () {
+  document.getElementById("speedLabel").textContent = `${this.value} cells/s`;
+});
+
+requestAnimationFrame(frame);
+
+// debug/inspection hook
+window.__fleetState = () => ({
+  buses: buses.map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y),
+    job: b.job ? b.job.phase : null, queue: b.queue.length })),
+  waiting: passengers.filter(p => p.state === "waiting" || p.state === "assigned").length,
+  riding: passengers.filter(p => p.state === "riding").length,
+  delivered: deliveredCount, demands: demandCount,
+});
+</script>
+</body>
+</html>

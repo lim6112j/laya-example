@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>laya runs the warehouse</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --border: #d9dde3; --text: #1c2128;
+    --muted: #6b7280; --accent: #4f46e5; --accent-soft: #eef2ff;
+    --danger: #b91c1c; --danger-bg: #fef2f2; --ok: #047857;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header { padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { margin: 0; font-size: 17px; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  header a { color: var(--accent); text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+  main {
+    display: grid; grid-template-columns: minmax(440px, 6fr) minmax(340px, 5fr);
+    gap: 20px; padding: 20px 24px; max-width: 1240px; margin: 0 auto;
+  }
+  @media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--muted); }
+  canvas { display: block; width: 100%; background: #1f2937; border-radius: 8px; }
+  .hud { display: flex; justify-content: space-between; color: var(--muted);
+    font-size: 13px; margin-bottom: 8px; }
+  .hud strong { color: var(--text); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); font-weight: 600;
+    font-size: 12px; visibility: hidden; }
+  .badge.on { visibility: visible; }
+  .chips { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+  .chip { padding: 3px 10px; border-radius: 999px; font-size: 12px;
+    border: 1px solid var(--border); color: var(--muted); background: #fff; }
+  .chip.blocked { border-color: var(--danger); color: var(--danger);
+    background: var(--danger-bg); font-weight: 600; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+  .controls label { color: var(--muted); font-size: 13px; }
+  .controls .ctl { display: flex; align-items: center; gap: 6px; }
+  button, select {
+    font: inherit; border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 12px; background: #fff; cursor: pointer; color: var(--text);
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent);
+    color: #fff; font-weight: 600; }
+  button.primary:hover { opacity: 0.9; color: #fff; }
+  input[type="range"] { accent-color: var(--accent); }
+  .bar { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+  .bar .bar-label { flex: 0 0 110px; color: var(--muted); font-size: 12px; }
+  .bar .bar-track { flex: 1; height: 10px; background: var(--accent-soft);
+    border-radius: 5px; overflow: hidden; }
+  .bar .bar-fill { height: 100%; background: var(--accent); border-radius: 5px;
+    transition: width 120ms; }
+  .bar.winner .bar-label { color: var(--text); font-weight: 600; }
+  .bar.winner .bar-fill { background: var(--ok); }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  #whoAsked { font-weight: 600; color: var(--accent); margin-bottom: 6px;
+    display: block; }
+  #stateView { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; background: #f3f4f6; border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px; white-space: pre-wrap; word-break: break-word;
+    min-height: 110px; color: #374151; }
+  #history { font-size: 12px; color: var(--muted); margin-top: 8px;
+    max-height: 150px; overflow-y: auto; }
+  #history div { padding: 2px 0; border-bottom: 1px dashed var(--border); }
+  #history .act { font-weight: 600; }
+  .act-stay { color: var(--danger); }
+  .act-left, .act-right { color: var(--accent); }
+  .banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 12px;
+    display: none; white-space: pre-wrap; }
+  .banner.error { display: block; background: var(--danger-bg);
+    color: var(--danger); border: 1px solid #fecaca; }
+</style>
+</head>
+<body>
+<header>
+  <h1>laya runs the warehouse 🚚</h1>
+  <p>Three delivery robots, forward lidar, crossing routes → when a robot is blocked it asks laya
+     <code>move: choice(left/stay/right)</code> — left/right sidestep around the obstacle, stay waits.
+     Autoplay off = robots just stop (watch the deadlock). <a href="/">← back to the main UI</a></p>
+</header>
+<main>
+  <section>
+    <div class="panel">
+      <div class="hud">
+        <span>Deliveries <strong id="deliveries">0</strong></span>
+        <span>Blocked now <strong id="blockedNow">0</strong></span>
+        <span class="badge" id="autoplayBadge">LAYA IS DISPATCHING</span>
+      </div>
+      <canvas id="sim" width="520" height="420"></canvas>
+      <div class="chips">
+        <span class="chip" id="chip-R1">R1 · —</span>
+        <span class="chip" id="chip-R2">R2 · —</span>
+        <span class="chip" id="chip-R3">R3 · —</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>Controls</h2>
+      <div class="controls">
+        <button id="startBtn" class="primary">Start / Restart</button>
+        <button id="pauseBtn">Pause</button>
+        <span class="ctl"><input type="checkbox" id="autoplay" checked>
+          <label for="autoplay">Laya dispatch <span style="color:var(--muted)">(off = blocked robots stop forever)</span></label></span>
+        <span class="ctl"><label>Model</label>
+          <select id="model">
+            <option value="auto">auto</option>
+            <option value="english">english</option>
+            <option value="typed-decisions">typed-decisions</option>
+          </select></span>
+        <span class="ctl"><label>Decide every</label>
+          <input type="range" id="interval" min="200" max="500" step="50" value="300">
+          <label id="intervalLabel">300 ms</label></span>
+        <span class="ctl"><label>Robot speed</label>
+          <input type="range" id="speed" min="40" max="140" step="10" value="80">
+          <label id="speedLabel">80 px/s</label></span>
+        <span class="ctl"><label>Lidar range</label>
+          <input type="range" id="lidar" min="50" max="150" step="10" value="90">
+          <label id="lidarLabel">90 px</label></span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div id="banner" class="banner"></div>
+    <div class="panel">
+      <h2>Laya's view — the state it receives</h2>
+      <span id="whoAsked"></span>
+      <div id="stateView">not started yet</div>
+    </div>
+    <div class="panel">
+      <h2>Laya's decisions</h2>
+      <div id="decisionBars"></div>
+      <div class="meta" id="decisionMeta">no decisions yet</div>
+      <div id="history"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+// ---- fixed geometry ---------------------------------------------------------
+
+const W = 520, H = 420;
+const HOUSE = { x: 205, y: 28, w: 110, h: 62 };          // cargo house building
+const DOCK = { x: HOUSE.x + HOUSE.w / 2, y: HOUSE.y + HOUSE.h };  // delivery point
+const PX_PER_M = 10;
+const ROBOT_R = 9;
+const MIN_SEP = 2 * ROBOT_R + 3;                          // hard collision safety
+const LIDAR_HALF_ANGLE = 45 * Math.PI / 180;
+const SIDESTEP_MS = 1500;
+
+const fmtM = px => `${Math.max(1, Math.round(px / PX_PER_M))} m`;
+
+// ---- routes -----------------------------------------------------------------
+
+const ROUTES = {
+  R1: {
+    color: "#f87171",
+    // R1 and R2 cross at (260, ~280), right on R3's lane — deliberate congestion
+    outbound: [{ x: 55, y: 390 }, { x: 300, y: 260 }, DOCK],
+    start: { x: 55, y: 390 },
+  },
+  R2: {
+    color: "#4ade80",
+    outbound: [{ x: 465, y: 390 }, { x: 220, y: 260 }, DOCK],
+    start: { x: 465, y: 390 },
+  },
+  R3: {
+    color: "#60a5fa",
+    outbound: [{ x: 260, y: 405 }, { x: 260, y: 300 }, DOCK],
+    start: { x: 260, y: 405 },
+  },
+};
+
+function makeRobot(rid) {
+  const spec = ROUTES[rid];
+  return {
+    id: rid, color: spec.color,
+    x: spec.start.x, y: spec.start.y,
+    waypoints: spec.outbound, wp: 0,
+    mode: "outbound",                       // outbound -> deliver, return -> loop
+    heading: 0, waiting: false,
+    sidestepUntil: 0, sidestepDir: 0,
+    blockedSince: null, obstacle: null,
+    deliveries: 0, asking: false, lastAsk: 0,
+  };
+}
+
+// ---- simulation state -------------------------------------------------------
+
+const canvas = document.getElementById("sim");
+const ctx = canvas.getContext("2d");
+
+let robots = [], running = false, paused = false;
+let lastTime = 0;
+
+function speed() { return Number(document.getElementById("speed").value); }
+function lidarRange() { return Number(document.getElementById("lidar").value); }
+function distanceToDock(r) { return Math.hypot(r.x - DOCK.x, r.y - DOCK.y); }
+
+// ---- lidar ------------------------------------------------------------------
+
+// Vector to another robot in my frame: x = lateral (+right), y = forward (+ahead)
+function relativeTo(observer, other) {
+  const dx = other.x - observer.x, dy = other.y - observer.y;
+  const cos = Math.cos(observer.heading), sin = Math.sin(observer.heading);
+  return {
+    y: dx * cos + dy * sin,       // forward component
+    x: -dx * sin + dy * cos,      // lateral component, +right
+  };
+}
+
+function scanLidar(robot) {
+  const range = lidarRange();
+  let best = null;
+  for (const other of robots) {
+    if (other === robot) continue;
+    const rel = relativeTo(robot, other);
+    const dist = Math.hypot(rel.x, rel.y);
+    if (dist > range) continue;
+    const angle = Math.abs(Math.atan2(rel.x, Math.max(0, rel.y)));
+    if (rel.y < 0 || angle > LIDAR_HALF_ANGLE) continue;
+    if (!best || dist < best.dist) best = { other: other.id, dist, rel };
+  }
+  return best;
+}
+
+// ---- laya decision loop ------------------------------------------------------
+
+// Same left/stay/right schema that scored a 100% side-match rate in the
+// Breakout demo — the 4-way keep/wait/sidestep question produced ~uniform
+// probabilities (out of training distribution) and permanent gridlock.
+const QUESTION = {
+  type: "choice",
+  instructions: "You are a warehouse delivery robot. Another robot is blocking your path ahead. In which direction should you move to resolve the blockage?",
+  criteria: {
+    left: "move to my left to get around the obstacle, then merge back to my route",
+    stay: "wait only if I have been blocked for just a few seconds and the obstacle is about to clear my path",
+    right: "move to my right to get around the obstacle, then merge back to my route",
+  },
+};
+
+// Once waiting has demonstrably failed (blocked >= 5 s), the dispatcher stops
+// offering "stay" and asks laya which way to sidestep — a two-way directional
+// choice, which is the decision type the checkpoints handle most decisively.
+function buildQuestion(robot) {
+  const blockedFor = robot.blockedSince
+    ? (performance.now() - robot.blockedSince) / 1000 : 0;
+  if (blockedFor < 5) return QUESTION;
+  return {
+    type: "choice",
+    instructions: "You are a warehouse delivery robot. Another robot has been blocking your path for a long time and will not clear it on its own. You must get around it now. In which direction should you sidestep?",
+    criteria: {
+      left: "sidestep to my left to pass the obstacle, then merge back to my route",
+      right: "sidestep to my right to pass the obstacle, then merge back to my route",
+    },
+  };
+}
+
+function describeMotion(me, other, who) {
+  const diff = Math.abs(other.heading - me.heading) % (2 * Math.PI);
+  const possessive = who === "you" ? "your" : "my";
+  if (diff < Math.PI / 6 || diff > 11 * Math.PI / 6) return `moving in the same direction as ${who}`;
+  if (diff > 5 * Math.PI / 6 && diff < 7 * Math.PI / 6) return `moving toward ${who}`;
+  return `crossing ${possessive} path`;
+}
+
+function describeOther(me, other, who) {
+  const rel = relativeTo(me, other);
+  const dist = fmtM(Math.hypot(rel.x, rel.y));
+  const fore = rel.y >= 0 ? `${dist} ahead of ${who}` : `${dist} behind ${who}`;
+  const side = rel.x > 12 ? ", to my right" : rel.x < -12 ? ", to my left" : "";
+  return `The ${colorName(other)} robot is ${fore}${side}, ${describeMotion(me, other, who)}.`;
+}
+
+function colorName(r) {
+  return { R1: "red", R2: "green", R3: "blue" }[r.id];
+}
+
+function buildState(robot, scan) {
+  const obstacle = robots.find(r => r.id === scan.other);
+  const others = robots.filter(r => r !== robot)
+    .map(r => describeOther(robot, r, "me")).join(" ");
+  const blockedFor = robot.blockedSince
+    ? Math.round((performance.now() - robot.blockedSince) / 1000) : 0;
+  // escalate: long waits must push laya off "wait"
+  const urgency = blockedFor >= 5
+    ? `; I have already been blocked for ${blockedFor} seconds — waiting is no longer acceptable, I must get around the obstacle`
+    : "";
+  // spell out the physical constraint the lidar distance implies
+  const gapAnalysis = scan.dist < 40
+    ? "the obstacle is very close — there is no room to continue forward without contact; I must stop or sidestep"
+    : "there is room to maneuver";
+  return {
+    situation: `You are the ${colorName(robot)} delivery robot heading to the cargo house dock, ` +
+      `${fmtM(distanceToDock(robot))} away. Your lidar sees the ${colorName(obstacle)} robot ` +
+      `directly ahead in your path, ${fmtM(scan.dist)} away, ` +
+      `${describeMotion(robot, obstacle, "you")}. ${others}`,
+    lidar: `obstacle ahead: ${scan.other} (${colorName(obstacle)}), ` +
+      `${fmtM(scan.dist)}, in my lane; ${gapAnalysis}`,
+    mission: `${robot.deliveries} ${robot.deliveries === 1 ? "delivery" : "deliveries"} completed; ` +
+      `blocked for ${blockedFor} seconds${urgency}`,
+  };
+}
+
+async function askLaya(robot) {
+  const scan = scanLidar(robot);
+  if (!scan) return;
+  robot.asking = true;
+  robot.lastAsk = performance.now();
+  const state = buildState(robot, scan);
+  document.getElementById("whoAsked").textContent =
+    `Robot ${robot.id} (${colorName(robot)}) asked:`;
+  document.getElementById("stateView").textContent = JSON.stringify(state, null, 2);
+  try {
+    const response = await fetch("/api/predict", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        state,
+        questions: { move: buildQuestion(robot) },
+        model: document.getElementById("model").value,
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      showError(`Prediction failed (${response.status}): ${detail}`);
+      return;
+    }
+    applyDecision(robot, scan, body);
+  } catch (err) {
+    showError("Prediction failed: " + err.message);
+  } finally {
+    robot.asking = false;
+  }
+}
+
+// bar order follows whichever question was asked (2- or 3-way)
+function barsFor(probs) {
+  const known = ["left", "stay", "right"];
+  return known.filter(label => label in probs);
+}
+
+function applyDecision(robot, scan, body) {
+  const answer = body.result.answers.move;
+  const action = answer.choice;
+  // "stay" = wait; "left"/"right" = sidestep maneuver
+  // a sidestep already in progress finishes before a "stay" takes hold —
+  // cancelling it mid-maneuver would freeze the robot beside the obstacle
+  const sidestepping = performance.now() < robot.sidestepUntil;
+  if (action === "stay") {
+    if (!sidestepping) robot.waiting = true;
+  } else {
+    robot.waiting = false;
+    // commit to one direction per maneuver — flipping mid-sidestep every
+    // decision tick would zigzag with zero net progress
+    if (!sidestepping) {
+      robot.sidestepUntil = performance.now() + SIDESTEP_MS;
+      robot.sidestepDir = action === "left" ? -1 : 1;
+    }
+  }
+
+  renderDecision(robot, action, answer.probabilities || {}, answer.confidence, body.latency_ms, scan);
+}
+
+function renderDecision(robot, action, probs, confidence, latency, scan) {
+  const bars = document.getElementById("decisionBars");
+  bars.innerHTML = "";
+  for (const label of barsFor(probs)) {
+    const value = probs[label] || 0;
+    const pct = (value * 100).toFixed(1);
+    const row = document.createElement("div");
+    row.className = "bar" + (label === action ? " winner" : "");
+    row.innerHTML =
+      `<div class="bar-label">${label.replace("_", " ")}</div>` +
+      `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>` +
+      `<div class="bar-label">${pct}%${label === action ? " ← laya" : ""}</div>`;
+    bars.appendChild(row);
+  }
+  document.getElementById("decisionMeta").textContent =
+    `robot ${robot.id} · confidence ${confidence} · latency ${latency} ms`;
+
+  const history = document.getElementById("history");
+  const entry = document.createElement("div");
+  entry.innerHTML = `<span class="act act-${action}">${robot.id} → ${action.replace("_", " ")}</span>` +
+    ` (${((probs[action] || 0) * 100).toFixed(0)}%) · gap ${fmtM(scan.dist)} · ` +
+    `${new Date().toLocaleTimeString()}`;
+  history.prepend(entry);
+  while (history.children.length > 12) history.lastChild.remove();
+}
+
+function showError(message) {
+  const banner = document.getElementById("banner");
+  banner.textContent = message;
+  banner.className = message ? "banner error" : "banner";
+}
+
+function decideTick() {
+  if (!running || paused) return;
+  const now = performance.now();
+  const interval = Number(document.getElementById("interval").value);
+  if (!document.getElementById("autoplay").checked) return;
+  for (const robot of robots) {
+    if (robot.asking || now - robot.lastAsk < interval) continue;
+    const scan = scanLidar(robot);
+    if (scan) askLaya(robot);
+  }
+}
+
+// ---- physics -----------------------------------------------------------------
+
+function step(dt, now) {
+  if (!running || paused) return;
+  const blocked = [];
+  for (const robot of robots) {
+    const scan = scanLidar(robot);
+    robot.obstacle = scan;
+    if (scan) {
+      if (robot.blockedSince === null) robot.blockedSince = now;
+      // fallback (autoplay off): blocked robots just stop — the deadlock demo
+      if (!document.getElementById("autoplay").checked) robot.waiting = true;
+    } else {
+      robot.blockedSince = null;
+      robot.waiting = false;
+    }
+    blocked.push(!!scan);
+  }
+  document.getElementById("blockedNow").textContent = blocked.filter(Boolean).length;
+  document.getElementById("deliveries").textContent =
+    robots.reduce((n, r) => n + r.deliveries, 0);
+  updateChips();
+
+  for (const robot of robots) {
+    let vx = 0, vy = 0;
+    if (now < robot.sidestepUntil) {
+      // perpendicular crawl to get around the obstacle
+      const px = Math.cos(robot.heading), py = Math.sin(robot.heading);
+      vx = -py * robot.sidestepDir * speed();
+      vy = px * robot.sidestepDir * speed();
+    } else if (!robot.waiting) {
+      const target = robot.waypoints[robot.wp];
+      const dx = target.x - robot.x, dy = target.y - robot.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 5) {
+        robot.wp++;
+        if (robot.wp >= robot.waypoints.length) {
+          // outbound exhausted -> delivered (count it once, on outbound only);
+          // swap to the reversed route and back
+          if (robot.mode === "outbound") robot.deliveries++;
+          robot.mode = robot.mode === "outbound" ? "return" : "outbound";
+          robot.waypoints = robot.mode === "return"
+            ? [...ROUTES[robot.id].outbound].slice(0, -1).reverse().concat([ROUTES[robot.id].start])
+            : ROUTES[robot.id].outbound;
+          robot.wp = 0;
+        }
+        continue;
+      }
+      robot.heading = Math.atan2(dy, dx);
+      vx = dx / dist * speed();
+      vy = dy / dist * speed();
+    }
+
+    // hard safety: never overlap another robot, whatever laya decided. If the
+    // direct move is blocked, slide along at increasing angles — otherwise two
+    // robots approaching head-on can push-lock outside each other's lidar cone.
+    let moved = false;
+    for (const off of [0, 0.6, -0.6, 1.2, -1.2, Math.PI / 2, -Math.PI / 2]) {
+      const sx = vx * Math.cos(off) - vy * Math.sin(off);
+      const sy = vx * Math.sin(off) + vy * Math.cos(off);
+      const nx = robot.x + sx * dt, ny = robot.y + sy * dt;
+      const collides = robots.some(o => o !== robot &&
+        Math.hypot(nx - o.x, ny - o.y) < MIN_SEP);
+      if (!collides) { robot.x = nx; robot.y = ny; moved = true; break; }
+    }
+  }
+}
+
+function updateChips() {
+  for (const robot of robots) {
+    const chip = document.getElementById(`chip-${robot.id}`);
+    if (robot.obstacle) {
+      chip.textContent = `${robot.id} · blocked by ${robot.obstacle.other} (${fmtM(robot.obstacle.dist)})`;
+      chip.className = "chip blocked";
+    } else {
+      chip.textContent = `${robot.id} · clear`;
+      chip.className = "chip";
+    }
+  }
+}
+
+// ---- rendering ---------------------------------------------------------------
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // routes
+  if (robots.length) {
+    for (const robot of robots) {
+      if (robot.mode !== "outbound") continue;
+      ctx.strokeStyle = robot.color + "44";
+      ctx.setLineDash([4, 6]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(robot.x, robot.y);
+      for (let i = robot.wp; i < robot.waypoints.length; i++) {
+        ctx.lineTo(robot.waypoints[i].x, robot.waypoints[i].y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // cargo house
+  ctx.fillStyle = "#374151";
+  ctx.fillRect(HOUSE.x, HOUSE.y, HOUSE.w, HOUSE.h);
+  ctx.fillStyle = "#9ca3af";
+  ctx.fillRect(HOUSE.x + HOUSE.w / 2 - 18, HOUSE.y + HOUSE.h - 6, 36, 6);
+  ctx.fillStyle = "#d1d5db";
+  ctx.font = "10px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("CARGO HOUSE", HOUSE.x + HOUSE.w / 2, HOUSE.y + HOUSE.h / 2 + 3);
+
+  // robots + lidar cones
+  for (const robot of robots) {
+    if (robot.obstacle) {
+      ctx.fillStyle = robot.color + "22";
+      ctx.beginPath();
+      ctx.moveTo(robot.x, robot.y);
+      ctx.arc(robot.x, robot.y, lidarRange(),
+        robot.heading - LIDAR_HALF_ANGLE, robot.heading + LIDAR_HALF_ANGLE);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.fillStyle = robot.color;
+    ctx.beginPath();
+    ctx.arc(robot.x, robot.y, ROBOT_R, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#111827";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(robot.x, robot.y);
+    ctx.lineTo(robot.x + Math.cos(robot.heading) * ROBOT_R,
+               robot.y + Math.sin(robot.heading) * ROBOT_R);
+    ctx.stroke();
+    ctx.fillStyle = "#e5e7eb";
+    ctx.font = "9px sans-serif";
+    ctx.fillText(robot.id, robot.x, robot.y - ROBOT_R - 3);
+  }
+
+  if (!running) {
+    ctx.fillStyle = "rgba(229, 231, 235, 0.9)";
+    ctx.font = "15px sans-serif";
+    ctx.fillText("press Start / Restart", W / 2, H / 2);
+  }
+  if (running && paused) {
+    ctx.fillStyle = "rgba(229, 231, 235, 0.9)";
+    ctx.font = "15px sans-serif";
+    ctx.fillText("paused", W / 2, H / 2);
+  }
+}
+
+function frame(t) {
+  const dt = Math.min((t - lastTime) / 1000, 0.033);
+  lastTime = t;
+  step(dt, performance.now());
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// ---- wiring -------------------------------------------------------------------
+
+function startSim() {
+  robots = [makeRobot("R1"), makeRobot("R2"), makeRobot("R3")];
+  // stagger the ask phases so the three robots don't decide simultaneously
+  // with near-identical state (symmetric answers → symmetric deadlock)
+  robots.forEach((r, i) => { r.lastAsk = i * 120; });
+  running = true; paused = false;
+  document.getElementById("pauseBtn").textContent = "Pause";
+  document.getElementById("history").innerHTML = "";
+  document.getElementById("decisionBars").innerHTML = "";
+  document.getElementById("decisionMeta").textContent = "no decisions yet";
+  document.getElementById("whoAsked").textContent = "";
+  document.getElementById("stateView").textContent = "waiting for the first blocked robot…";
+  showError("");
+  updateAutoplayBadge();
+}
+
+function updateAutoplayBadge() {
+  document.getElementById("autoplayBadge").className =
+    "badge" + (document.getElementById("autoplay").checked && running ? " on" : "");
+}
+
+document.getElementById("startBtn").addEventListener("click", startSim);
+document.getElementById("pauseBtn").addEventListener("click", function () {
+  paused = !paused;
+  this.textContent = paused ? "Resume" : "Pause";
+});
+document.getElementById("autoplay").addEventListener("change", updateAutoplayBadge);
+document.getElementById("interval").addEventListener("input", function () {
+  document.getElementById("intervalLabel").textContent = `${this.value} ms`;
+});
+document.getElementById("speed").addEventListener("input", function () {
+  document.getElementById("speedLabel").textContent = `${this.value} px/s`;
+});
+document.getElementById("lidar").addEventListener("input", function () {
+  document.getElementById("lidarLabel").textContent = `${this.value} px`;
+});
+
+setInterval(decideTick, 100);   // cheap poll; per-robot lastAsk enforces the real interval
+
+// debug/inspection hook: current robot states
+window.__simState = () => robots.map(r => ({
+  id: r.id, x: Math.round(r.x), y: Math.round(r.y), mode: r.mode, wp: r.wp,
+  waiting: r.waiting, sidestep: performance.now() < r.sidestepUntil,
+  headingDeg: Math.round(r.heading * 180 / Math.PI), deliveries: r.deliveries,
+}));
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

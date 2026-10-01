@@ -56,6 +56,22 @@ probability bars, confidence and latency ("Laya's decision"). Toggle autoplay
 off to play by arrow keys and compare; sliders tune the decision interval and
 ball speed, and the model override selects the checkpoint.
 
+### laya runs the warehouse
+
+`static/warehouse.html` (linked from the UI header) simulates a cargo house
+and three delivery robots on crossing routes, each with a forward lidar. When
+a robot's lidar sees another robot blocking its path, it serializes the
+situation to prose (who is ahead and how far, other robots' relative positions
+and motions, deliveries completed, seconds blocked) and asks laya
+`move: choice(left/stay/right)` — left/right sidestep around the obstacle,
+stay waits — so laya resolves the multi-agent blocking/deadlock problem. The screen
+shows the canvas with lidar cones and route lines, per-robot lidar chips,
+"Laya's view" (the state text the blocked robot sent) and "Laya's decisions"
+(action bars, confidence, latency, history). Hard collision prevention is
+independent of laya — physics never lets robots overlap; laya decides
+strategy. Toggle autoplay off to watch blocked robots stop forever: the
+deadlock laya prevents.
+
 ## Sensor anomaly detection
 
 `sensor_anomaly_detection.py` is a standalone, stdlib-only script (no laya

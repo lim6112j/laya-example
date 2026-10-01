@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>laya plays Breakout</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --border: #d9dde3; --text: #1c2128;
+    --muted: #6b7280; --accent: #4f46e5; --accent-soft: #eef2ff;
+    --danger: #b91c1c; --danger-bg: #fef2f2; --ok: #047857;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header { padding: 14px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { margin: 0; font-size: 17px; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  header a { color: var(--accent); text-decoration: none; }
+  header a:hover { text-decoration: underline; }
+  main {
+    display: grid; grid-template-columns: minmax(420px, 6fr) minmax(340px, 5fr);
+    gap: 20px; padding: 20px 24px; max-width: 1200px; margin: 0 auto;
+  }
+  @media (max-width: 940px) { main { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--muted); }
+  canvas { display: block; width: 100%; background: #111827; border-radius: 8px; }
+  .hud { display: flex; justify-content: space-between; color: var(--muted);
+    font-size: 13px; margin-bottom: 8px; }
+  .hud strong { color: var(--text); }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px;
+    background: var(--accent-soft); color: var(--accent); font-weight: 600;
+    font-size: 12px; visibility: hidden; }
+  .badge.on { visibility: visible; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+  .controls label { color: var(--muted); font-size: 13px; }
+  .controls .ctl { display: flex; align-items: center; gap: 6px; }
+  button, select {
+    font: inherit; border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 12px; background: #fff; cursor: pointer; color: var(--text);
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent);
+    color: #fff; font-weight: 600; }
+  button.primary:hover { opacity: 0.9; color: #fff; }
+  input[type="range"] { accent-color: var(--accent); }
+  .bar { display: flex; align-items: center; gap: 8px; margin: 5px 0; }
+  .bar .bar-label { flex: 0 0 44px; color: var(--muted); font-size: 12px; }
+  .bar .bar-track { flex: 1; height: 10px; background: var(--accent-soft);
+    border-radius: 5px; overflow: hidden; }
+  .bar .bar-fill { height: 100%; background: var(--accent); border-radius: 5px;
+    transition: width 120ms; }
+  .bar.winner .bar-label { color: var(--text); font-weight: 600; }
+  .bar.winner .bar-fill { background: var(--ok); }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  #stateView { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px; background: #f3f4f6; border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px; white-space: pre-wrap; word-break: break-word;
+    min-height: 110px; color: #374151; }
+  #history { font-size: 12px; color: var(--muted); margin-top: 8px;
+    max-height: 130px; overflow-y: auto; }
+  #history div { padding: 2px 0; border-bottom: 1px dashed var(--border); }
+  #history .choice-left { color: var(--danger); font-weight: 600; }
+  #history .choice-right { color: var(--ok); font-weight: 600; }
+  #history .choice-stay { color: var(--muted); font-weight: 600; }
+  .banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 12px;
+    display: none; white-space: pre-wrap; }
+  .banner.error { display: block; background: var(--danger-bg);
+    color: var(--danger); border: 1px solid #fecaca; }
+</style>
+</head>
+<body>
+<header>
+  <h1>laya plays Breakout 🕹️</h1>
+  <p>Game state serialized to text every tick → laya answers <code>move: choice(left/stay/right)</code> →
+     the paddle obeys. <a href="/">← back to the main UI</a></p>
+</header>
+<main>
+  <section>
+    <div class="panel">
+      <div class="hud">
+        <span>Score <strong id="score">0</strong></span>
+        <span>Lives <strong id="lives">3</strong></span>
+        <span>Bricks <strong id="bricksLeft">40</strong></span>
+        <span class="badge" id="autoplayBadge">LAYA IS PLAYING</span>
+      </div>
+      <canvas id="game" width="480" height="360"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Controls</h2>
+      <div class="controls">
+        <button id="startBtn" class="primary">Start / Restart</button>
+        <button id="pauseBtn">Pause</button>
+        <span class="ctl"><input type="checkbox" id="autoplay" checked>
+          <label for="autoplay">Laya autoplay <span style="color:var(--muted)">(off = arrow keys)</span></label></span>
+        <span class="ctl"><label>Model</label>
+          <select id="model">
+            <option value="auto">auto</option>
+            <option value="english">english</option>
+            <option value="typed-decisions">typed-decisions</option>
+          </select></span>
+        <span class="ctl"><label>Decide every</label>
+          <input type="range" id="interval" min="150" max="500" step="50" value="250">
+          <label id="intervalLabel">250 ms</label></span>
+        <span class="ctl"><label>Ball speed</label>
+          <input type="range" id="ballSpeed" min="100" max="300" step="20" value="160">
+          <label id="ballSpeedLabel">160 px/s</label></span>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div id="banner" class="banner"></div>
+    <div class="panel">
+      <h2>Laya's view — the state it receives</h2>
+      <div id="stateView">not started yet</div>
+    </div>
+    <div class="panel">
+      <h2>Laya's decision — move: left / stay / right</h2>
+      <div id="decisionBars"></div>
+      <div class="meta" id="decisionMeta">no decisions yet</div>
+      <div id="history"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+// ---- fixed game geometry ---------------------------------------------------
+
+const W = 480, H = 360;
+const ROWS = 5, COLS = 8;
+const BRICK_TOP = 30, BRICK_H = 14, BRICK_GAP = 4;
+const BRICK_W = (W - 2 * BRICK_GAP) / COLS - BRICK_GAP;
+const PADDLE_W = 70, PADDLE_H = 10, PADDLE_Y = H - 24;
+const PADDLE_SPEED = 200;           // px/s, same in both modes
+const BALL_R = 5;
+const ROW_COLORS = ["#f87171", "#fb923c", "#facc15", "#4ade80", "#60a5fa"];
+
+// ---- game state ------------------------------------------------------------
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+let ball, paddleX, bricks, score, lives, running = false, paused = false;
+let paddleDir = 0;                  // laya's current command: -1 | 0 | 1
+let lastTime = 0;
+
+function resetBall() {
+  ball = {
+    x: W / 2, y: PADDLE_Y - BALL_R - 1,
+    vx: (Math.random() < 0.5 ? -1 : 1) * ballSpeed() * 0.5,
+    vy: -ballSpeed(),
+  };
+  paddleDir = 0;
+}
+
+function startGame() {
+  paddleX = W / 2;
+  score = 0; lives = 3;
+  bricks = [];
+  for (let r = 0; r < ROWS; r++) {
+    bricks.push(Array.from({ length: COLS }, () => true));
+  }
+  resetBall();
+  running = true; paused = false;
+  updateHud();
+  document.getElementById("history").innerHTML = "";
+  document.getElementById("decisionMeta").textContent = "no decisions yet";
+  showError("");
+}
+
+function aliveBricks() {
+  return bricks.reduce((n, row) => n + row.filter(Boolean).length, 0);
+}
+
+function ballSpeed() { return Number(document.getElementById("ballSpeed").value); }
+
+// ---- physics ---------------------------------------------------------------
+
+function step(dt) {
+  if (!running || paused) return;
+
+  // paddle: laya's command or the player's arrow keys
+  const keyDir = (keys.ArrowLeft ? -1 : 0) + (keys.ArrowRight ? 1 : 0);
+  const dir = document.getElementById("autoplay").checked ? paddleDir : keyDir;
+  paddleX = Math.min(W - PADDLE_W / 2, Math.max(PADDLE_W / 2,
+    paddleX + dir * PADDLE_SPEED * dt));
+
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+
+  if (ball.x < BALL_R) { ball.x = BALL_R; ball.vx = Math.abs(ball.vx); }
+  if (ball.x > W - BALL_R) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); }
+  if (ball.y < BALL_R) { ball.y = BALL_R; ball.vy = Math.abs(ball.vy); }
+
+  // paddle bounce: exit angle depends on where the ball lands on the paddle
+  if (ball.vy > 0 && ball.y + BALL_R >= PADDLE_Y &&
+      ball.y + BALL_R <= PADDLE_Y + PADDLE_H + 6 &&
+      Math.abs(ball.x - paddleX) <= PADDLE_W / 2 + BALL_R) {
+    const hit = (ball.x - paddleX) / (PADDLE_W / 2);   // -1 .. 1
+    const speed = Math.hypot(ball.vx, ball.vy);
+    const angle = hit * (Math.PI / 3);                 // max 60° from vertical
+    ball.vx = speed * Math.sin(angle);
+    ball.vy = -Math.abs(speed * Math.cos(angle));
+    ball.y = PADDLE_Y - BALL_R;
+  }
+
+  // bricks: kill the first one the ball overlaps, reflect on the shallower axis
+  const rowH = BRICK_H + BRICK_GAP;
+  const rHit = Math.floor((ball.y - BRICK_TOP) / rowH);
+  for (const r of [rHit, rHit - 1, rHit + 1]) {
+    if (r < 0 || r >= ROWS) continue;
+    for (let c = 0; c < COLS; c++) {
+      if (!bricks[r][c]) continue;
+      const bx = BRICK_GAP + c * (BRICK_W + BRICK_GAP);
+      const by = BRICK_TOP + r * rowH;
+      if (ball.x + BALL_R < bx || ball.x - BALL_R > bx + BRICK_W ||
+          ball.y + BALL_R < by || ball.y - BALL_R > by + BRICK_H) continue;
+      bricks[r][c] = false;
+      score++;
+      const overlapX = Math.min(ball.x + BALL_R - bx, bx + BRICK_W - (ball.x - BALL_R));
+      const overlapY = Math.min(ball.y + BALL_R - by, by + BRICK_H - (ball.y - BALL_R));
+      if (overlapX < overlapY) ball.vx = -ball.vx; else ball.vy = -ball.vy;
+      updateHud();
+      if (aliveBricks() === 0) { running = false; }   // cleared the board
+      return;
+    }
+  }
+
+  // fell past the paddle
+  if (ball.y > H + BALL_R) {
+    lives--;
+    updateHud();
+    if (lives <= 0) { running = false; } else { resetBall(); }
+  }
+}
+
+// ---- rendering -------------------------------------------------------------
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (!bricks || !bricks[r][c]) continue;
+      ctx.fillStyle = ROW_COLORS[r];
+      ctx.fillRect(BRICK_GAP + c * (BRICK_W + BRICK_GAP),
+                   BRICK_TOP + r * (BRICK_H + BRICK_GAP), BRICK_W, BRICK_H);
+    }
+  }
+  if (ball && Number.isFinite(paddleX)) {
+    ctx.fillStyle = "#e5e7eb";
+    ctx.fillRect(paddleX - PADDLE_W / 2, PADDLE_Y, PADDLE_W, PADDLE_H);
+    ctx.fillStyle = "#f9fafb";
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.fillStyle = "rgba(229, 231, 235, 0.9)";
+  ctx.font = "16px sans-serif";
+  ctx.textAlign = "center";
+  if (running && paused) ctx.fillText("paused", W / 2, H / 2);
+  if (running && aliveBricks() === 0) ctx.fillText("board cleared!", W / 2, H / 2);
+  if (lives <= 0) ctx.fillText("game over", W / 2, H / 2);
+}
+
+function updateHud() {
+  document.getElementById("score").textContent = score;
+  document.getElementById("lives").textContent = lives;
+  document.getElementById("bricksLeft").textContent = bricks ? aliveBricks() : ROWS * COLS;
+}
+
+function frame(t) {
+  const dt = Math.min((t - lastTime) / 1000, 0.033);
+  lastTime = t;
+  step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+
+// ---- keyboard (human mode) -------------------------------------------------
+
+const keys = {};
+window.addEventListener("keydown", e => {
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    keys[e.key] = true;
+    if (!document.getElementById("autoplay").checked) e.preventDefault();
+  }
+});
+window.addEventListener("keyup", e => { keys[e.key] = false; });
+
+// ---- laya's view of the game (state serialization) --------------------------
+
+const QUESTION = {
+  type: "choice",
+  instructions: "In which direction should the paddle move to catch or intercept the ball?",
+  criteria: {
+    left: "the ball is to the left of the paddle or moving away from it on the right",
+    stay: "the paddle is already aligned under the ball's landing point",
+    right: "the ball is to the right of the paddle or moving away from it on the left",
+  },
+};
+
+function buildState() {
+  const gap = ball.x - paddleX;
+  const descending = ball.vy > 0;
+  // Prose reads measurably better than numeric fields to the ticket-trained
+  // checkpoint (verified: ~0.32 vs ~0.05 confidence on a known-side ball).
+  const side = gap > 15
+    ? `clearly to the RIGHT of the paddle (gap ${gap.toFixed(0)} px)`
+    : gap < -15
+      ? `clearly to the LEFT of the paddle (gap ${Math.abs(gap).toFixed(0)} px)`
+      : "almost directly above the paddle";
+  const timeToPaddle = descending
+    ? `about ${((PADDLE_Y - ball.y) / ball.vy).toFixed(1)} seconds until it reaches paddle level`
+    : "rising away from the paddle";
+  return {
+    situation: `The ball is ${side} and moving ${ball.vx > 0 ? "right" : "left"} and ` +
+      `${descending ? "down, falling toward the paddle" : "up, away from the paddle"}. ` +
+      `${timeToPaddle.charAt(0).toUpperCase() + timeToPaddle.slice(1)}.`,
+    bricks: `${aliveBricks()} of ${ROWS * COLS} remain; score ${score}, ${lives} lives left`,
+  };
+}
+
+// ---- laya decision loop -----------------------------------------------------
+
+let predicting = false;
+let decideTimer = null;
+
+function showError(message) {
+  const banner = document.getElementById("banner");
+  banner.textContent = message;
+  banner.className = message ? "banner error" : "banner";
+}
+
+async function decide() {
+  if (predicting || !running || paused) return;
+  if (!document.getElementById("autoplay").checked) return;
+  predicting = true;
+  const state = buildState();
+  document.getElementById("stateView").textContent = JSON.stringify(state, null, 2);
+  try {
+    const response = await fetch("/api/predict", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        state,
+        questions: { move: QUESTION },
+        model: document.getElementById("model").value,
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+      showError(`Prediction failed (${response.status}): ${detail}`);
+      return;
+    }
+    renderDecision(body);
+  } catch (err) {
+    showError("Prediction failed: " + err.message);
+  } finally {
+    predicting = false;
+  }
+}
+
+const MOVE_BAR_ORDER = ["left", "stay", "right"];
+
+function renderDecision(body) {
+  const answer = body.result.answers.move;
+  const choice = answer.choice;
+  paddleDir = choice === "left" ? -1 : choice === "right" ? 1 : 0;
+
+  const bars = document.getElementById("decisionBars");
+  bars.innerHTML = "";
+  const probs = answer.probabilities || {};
+  for (const label of MOVE_BAR_ORDER) {
+    const value = probs[label] || 0;
+    const pct = (value * 100).toFixed(1);
+    const row = document.createElement("div");
+    row.className = "bar" + (label === choice ? " winner" : "");
+    const winnerSuffix = label === choice ? " ← laya" : "";
+    row.innerHTML =
+      `<div class="bar-label">${label}</div>` +
+      `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>` +
+      `<div class="bar-label">${pct}%${winnerSuffix}</div>`;
+    bars.appendChild(row);
+  }
+  document.getElementById("decisionMeta").textContent =
+    `confidence ${answer.confidence} · latency ${body.latency_ms} ms`;
+
+  const history = document.getElementById("history");
+  const entry = document.createElement("div");
+  const time = new Date().toLocaleTimeString();
+  entry.innerHTML = `<span class="choice-${choice}">${choice}</span> ` +
+    `(${(probs[choice] * 100 || 0).toFixed(0)}%) · score ${score} · ${time}`;
+  history.prepend(entry);
+  while (history.children.length > 12) history.lastChild.remove();
+}
+
+function restartDecideTimer() {
+  if (decideTimer) clearInterval(decideTimer);
+  const ms = Number(document.getElementById("interval").value);
+  document.getElementById("intervalLabel").textContent = `${ms} ms`;
+  decideTimer = setInterval(decide, ms);
+}
+
+// ---- wiring -----------------------------------------------------------------
+
+document.getElementById("startBtn").addEventListener("click", () => {
+  startGame();
+  document.getElementById("autoplayBadge").className =
+    "badge" + (document.getElementById("autoplay").checked ? " on" : "");
+  restartDecideTimer();
+});
+document.getElementById("pauseBtn").addEventListener("click", function () {
+  paused = !paused;
+  this.textContent = paused ? "Resume" : "Pause";
+});
+document.getElementById("autoplay").addEventListener("change", function () {
+  document.getElementById("autoplayBadge").className =
+    "badge" + (this.checked && running ? " on" : "");
+});
+document.getElementById("interval").addEventListener("input", restartDecideTimer);
+document.getElementById("ballSpeed").addEventListener("input", function () {
+  document.getElementById("ballSpeedLabel").textContent = `${this.value} px/s`;
+  if (ball) {
+    // rescale current velocity to the new speed so the change applies live
+    const speed = Math.hypot(ball.vx, ball.vy) || 1;
+    const scale = Number(this.value) / speed;
+    ball.vx *= scale; ball.vy *= scale;
+  }
+});
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

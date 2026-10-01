@@ -43,6 +43,19 @@ metadata (model, repo, reason, latency).
 - `test_server.py` — stubbed-API tests, no model load:
   `uv run pytest test_server.py`
 
+### laya plays Breakout
+
+`static/breakout.html` (linked from the UI header) is an Atari-Breakout-style
+canvas game where laya controls the paddle. laya reads text, not pixels: every
+decision tick serializes the game state into a short text observation
+(ball position relative to the paddle, direction, estimated time to paddle
+level, bricks remaining) and asks one typed question —
+`move: choice(left/stay/right)`. The gameplay screen shows the canvas, the
+exact state text laya receives ("Laya's view"), and the decision with
+probability bars, confidence and latency ("Laya's decision"). Toggle autoplay
+off to play by arrow keys and compare; sliders tune the decision interval and
+ball speed, and the model override selects the checkpoint.
+
 ## Sensor anomaly detection
 
 `sensor_anomaly_detection.py` is a standalone, stdlib-only script (no laya

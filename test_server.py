@@ -5,6 +5,8 @@ uv run pytest test_server.py
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -143,3 +145,33 @@ def test_index_served(client):
     response = test_client.get("/")
     assert response.status_code == 200
     assert "laya web UI" in response.text
+
+
+def test_concurrent_predictions_are_serialized(client, monkeypatch):
+    """router.predict() must never run concurrently (MPS/Metal crashes if it does)."""
+    import threading
+
+    test_client, stub = client
+    overlap = []
+
+    def slow_predict(state, questions, **kwargs):
+        inside = {"entered": True}
+        overlap.append(inside)
+        time.sleep(0.05)
+        overlap.remove(inside)
+        return {"answers": {}, "routing": {}}
+
+    monkeypatch.setattr(stub, "predict", slow_predict)
+    threads = [
+        threading.Thread(
+            target=test_client.post,
+            args=("/api/predict",),
+            kwargs={"json": {"state": {"body": "hi"}, "questions": {"q": VALID_NOUL}}},
+        )
+        for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not overlap, "router.predict ran concurrently"

@@ -10,6 +10,7 @@ Run with: uv run uvicorn server:app
 
 from __future__ import annotations
 
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -63,6 +64,10 @@ class PredictRequest(BaseModel):
 
 class _RouterState:
     router: Any = None
+    # FastAPI runs sync endpoints in a threadpool, so concurrent requests can
+    # call router.predict() at once — which crashes MPS/Metal ("a command
+    # encoder is already encoding to this command buffer"). Serialize them.
+    predict_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -89,11 +94,12 @@ def predict(request: PredictRequest) -> dict[str, Any]:
     }
     try:
         start = time.perf_counter()
-        result = router.predict(
-            _stringify_state(request.state),
-            questions,
-            **({"model": request.model} if request.model != "auto" else {}),
-        )
+        with _RouterState.predict_lock:
+            result = router.predict(
+                _stringify_state(request.state),
+                questions,
+                **({"model": request.model} if request.model != "auto" else {}),
+            )
         latency_ms = round((time.perf_counter() - start) * 1000, 1)
     except HTTPException:
         raise

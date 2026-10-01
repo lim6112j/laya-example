@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>laya plays Breakout</title>
+<title>CJet plays Breakout</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --border: #d9dde3; --text: #1c2128;
@@ -76,8 +76,8 @@
 </head>
 <body>
 <header>
-  <h1>laya plays Breakout 🕹️</h1>
-  <p>Game state serialized to text every tick → laya answers <code>move: choice(left/stay/right)</code> →
+  <h1>CJet plays Breakout 🕹️</h1>
+  <p>Game state serialized to text every tick → CJet answers <code>move: choice(left/stay/right)</code> →
      the paddle obeys. <a href="/">← back to the main UI</a></p>
 </header>
 <main>
@@ -87,7 +87,7 @@
         <span>Score <strong id="score">0</strong></span>
         <span>Lives <strong id="lives">3</strong></span>
         <span>Bricks <strong id="bricksLeft">40</strong></span>
-        <span class="badge" id="autoplayBadge">LAYA IS PLAYING</span>
+        <span class="badge" id="autoplayBadge">CJET IS PLAYING</span>
       </div>
       <canvas id="game" width="480" height="360"></canvas>
     </div>
@@ -97,7 +97,7 @@
         <button id="startBtn" class="primary">Start / Restart</button>
         <button id="pauseBtn">Pause</button>
         <span class="ctl"><input type="checkbox" id="autoplay" checked>
-          <label for="autoplay">Laya autoplay <span style="color:var(--muted)">(off = arrow keys)</span></label></span>
+          <label for="autoplay">CJet autoplay <span style="color:var(--muted)">(off = arrow keys)</span></label></span>
         <span class="ctl"><label>Model</label>
           <select id="model">
             <option value="auto">auto</option>
@@ -117,11 +117,11 @@
   <section>
     <div id="banner" class="banner"></div>
     <div class="panel">
-      <h2>Laya's view — the state it receives</h2>
+      <h2>CJet's view — the state it receives</h2>
       <div id="stateView">not started yet</div>
     </div>
     <div class="panel">
-      <h2>Laya's decision — move: left / stay / right</h2>
+      <h2>CJet's decision — move: left / stay / right</h2>
       <div id="decisionBars"></div>
       <div class="meta" id="decisionMeta">no decisions yet</div>
       <div id="history"></div>
@@ -149,7 +149,7 @@ const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 
 let ball, paddleX, bricks, score, lives, running = false, paused = false;
-let paddleDir = 0;                  // laya's current command: -1 | 0 | 1
+let paddleDir = 0;                  // CJet's current command: -1 | 0 | 1
 let lastTime = 0;
 
 function resetBall() {
@@ -187,7 +187,7 @@ function ballSpeed() { return Number(document.getElementById("ballSpeed").value)
 function step(dt) {
   if (!running || paused) return;
 
-  // paddle: laya's command or the player's arrow keys
+  // paddle: CJet's command or the player's arrow keys
   const keyDir = (keys.ArrowLeft ? -1 : 0) + (keys.ArrowRight ? 1 : 0);
   const dir = document.getElementById("autoplay").checked ? paddleDir : keyDir;
   paddleX = Math.min(W - PADDLE_W / 2, Math.max(PADDLE_W / 2,
@@ -296,7 +296,7 @@ window.addEventListener("keydown", e => {
 });
 window.addEventListener("keyup", e => { keys[e.key] = false; });
 
-// ---- laya's view of the game (state serialization) --------------------------
+// ---- CJet's view of the game (state serialization) --------------------------
 
 const QUESTION = {
   type: "choice",
@@ -329,7 +329,7 @@ function buildState() {
   };
 }
 
-// ---- laya decision loop -----------------------------------------------------
+// ---- CJet decision loop -----------------------------------------------------
 
 let predicting = false;
 let decideTimer = null;
@@ -385,7 +385,7 @@ function renderDecision(body) {
     const pct = (value * 100).toFixed(1);
     const row = document.createElement("div");
     row.className = "bar" + (label === choice ? " winner" : "");
-    const winnerSuffix = label === choice ? " ← laya" : "";
+    const winnerSuffix = label === choice ? " ← CJet" : "";
     row.innerHTML =
       `<div class="bar-label">${label}</div>` +
       `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>` +

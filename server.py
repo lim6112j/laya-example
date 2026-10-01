@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="laya-example web UI", lifespan=lifespan)
+app = FastAPI(title="CJet web UI", lifespan=lifespan)
 
 
 def _stringify_state(state: dict[str, Any]) -> dict[str, str]:

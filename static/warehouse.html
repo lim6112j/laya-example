@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>laya runs the warehouse</title>
+<title>CJet runs the warehouse</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --border: #d9dde3; --text: #1c2128;
@@ -83,8 +83,8 @@
 </head>
 <body>
 <header>
-  <h1>laya runs the warehouse 🚚</h1>
-  <p>Three delivery robots, forward lidar, crossing routes → when a robot is blocked it asks laya
+  <h1>CJet runs the warehouse 🚚</h1>
+  <p>Three delivery robots, forward lidar, crossing routes → when a robot is blocked it asks CJet
      <code>move: choice(left/stay/right)</code> — left/right sidestep around the obstacle, stay waits.
      Autoplay off = robots just stop (watch the deadlock). <a href="/">← back to the main UI</a></p>
 </header>
@@ -94,7 +94,7 @@
       <div class="hud">
         <span>Deliveries <strong id="deliveries">0</strong></span>
         <span>Blocked now <strong id="blockedNow">0</strong></span>
-        <span class="badge" id="autoplayBadge">LAYA IS DISPATCHING</span>
+        <span class="badge" id="autoplayBadge">CJET IS DISPATCHING</span>
       </div>
       <canvas id="sim" width="520" height="420"></canvas>
       <div class="chips">
@@ -109,7 +109,7 @@
         <button id="startBtn" class="primary">Start / Restart</button>
         <button id="pauseBtn">Pause</button>
         <span class="ctl"><input type="checkbox" id="autoplay" checked>
-          <label for="autoplay">Laya dispatch <span style="color:var(--muted)">(off = blocked robots stop forever)</span></label></span>
+          <label for="autoplay">CJet dispatch <span style="color:var(--muted)">(off = blocked robots stop forever)</span></label></span>
         <span class="ctl"><label>Model</label>
           <select id="model">
             <option value="auto">auto</option>
@@ -132,12 +132,12 @@
   <section>
     <div id="banner" class="banner"></div>
     <div class="panel">
-      <h2>Laya's view — the state it receives</h2>
+      <h2>CJet's view — the state it receives</h2>
       <span id="whoAsked"></span>
       <div id="stateView">not started yet</div>
     </div>
     <div class="panel">
-      <h2>Laya's decisions</h2>
+      <h2>CJet's decisions</h2>
       <div id="decisionBars"></div>
       <div class="meta" id="decisionMeta">no decisions yet</div>
       <div id="history"></div>
@@ -235,7 +235,7 @@ function scanLidar(robot) {
   return best;
 }
 
-// ---- laya decision loop ------------------------------------------------------
+// ---- CJet decision loop ------------------------------------------------------
 
 // Same left/stay/right schema that scored a 100% side-match rate in the
 // Breakout demo — the 4-way keep/wait/sidestep question produced ~uniform
@@ -251,7 +251,7 @@ const QUESTION = {
 };
 
 // Once waiting has demonstrably failed (blocked >= 5 s), the dispatcher stops
-// offering "stay" and asks laya which way to sidestep — a two-way directional
+// offering "stay" and asks CJet which way to sidestep — a two-way directional
 // choice, which is the decision type the checkpoints handle most decisively.
 function buildQuestion(robot) {
   const blockedFor = robot.blockedSince
@@ -293,7 +293,7 @@ function buildState(robot, scan) {
     .map(r => describeOther(robot, r, "me")).join(" ");
   const blockedFor = robot.blockedSince
     ? Math.round((performance.now() - robot.blockedSince) / 1000) : 0;
-  // escalate: long waits must push laya off "wait"
+  // escalate: long waits must push CJet off "wait"
   const urgency = blockedFor >= 5
     ? `; I have already been blocked for ${blockedFor} seconds — waiting is no longer acceptable, I must get around the obstacle`
     : "";
@@ -313,7 +313,7 @@ function buildState(robot, scan) {
   };
 }
 
-async function askLaya(robot) {
+async function askCJet(robot) {
   const scan = scanLidar(robot);
   if (!scan) return;
   robot.asking = true;
@@ -385,7 +385,7 @@ function renderDecision(robot, action, probs, confidence, latency, scan) {
     row.innerHTML =
       `<div class="bar-label">${label.replace("_", " ")}</div>` +
       `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>` +
-      `<div class="bar-label">${pct}%${label === action ? " ← laya" : ""}</div>`;
+      `<div class="bar-label">${pct}%${label === action ? " ← CJet" : ""}</div>`;
     bars.appendChild(row);
   }
   document.getElementById("decisionMeta").textContent =
@@ -414,7 +414,7 @@ function decideTick() {
   for (const robot of robots) {
     if (robot.asking || now - robot.lastAsk < interval) continue;
     const scan = scanLidar(robot);
-    if (scan) askLaya(robot);
+    if (scan) askCJet(robot);
   }
 }
 
@@ -471,7 +471,7 @@ function step(dt, now) {
       vy = dy / dist * speed();
     }
 
-    // hard safety: never overlap another robot, whatever laya decided. If the
+    // hard safety: never overlap another robot, whatever CJet decided. If the
     // direct move is blocked, slide along at increasing angles — otherwise two
     // robots approaching head-on can push-lock outside each other's lidar cone.
     let moved = false;

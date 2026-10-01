@@ -19,7 +19,8 @@ downloaded from Hugging Face on first use and cached in `~/.cache/huggingface`.
 ## Web UI
 
 A browser UI for the same state / questions → result flow, backed by a
-long-lived FastAPI server (the ~7s model preload happens once at startup):
+long-lived FastAPI server (the ~7s model preload happens once at startup).
+The UI is branded **CJet**; the underlying decision engine is the laya library:
 
 ```sh
 uv run uvicorn server:app

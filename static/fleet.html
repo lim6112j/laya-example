@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>laya dispatches the bus fleet</title>
+<title>CJet dispatches the bus fleet</title>
 <style>
   :root {
     --bg: #f6f7f9; --panel: #ffffff; --border: #d9dde3; --text: #1c2128;
@@ -81,8 +81,8 @@
 </head>
 <body>
 <header>
-  <h1>laya dispatches the bus fleet 🚌</h1>
-  <p>50×50 grid, three autonomous buses. Every new passenger demand goes to laya:
+  <h1>CJet dispatches the bus fleet 🚌</h1>
+  <p>50×50 grid, three autonomous buses. Every new passenger demand goes to CJet:
      <code>assign: choice(bus_a/bus_b/bus_c)</code> — distance, load and queue all in prose.
      Dispatch off = greedy nearest-bus heuristic. <a href="/">← back to the main UI</a></p>
 </header>
@@ -94,7 +94,7 @@
         <span>Riding <strong id="riding">0</strong></span>
         <span>Delivered <strong id="delivered">0</strong></span>
         <span>Demands <strong id="demands">0</strong></span>
-        <span class="badge" id="autoplayBadge">LAYA IS DISPATCHING</span>
+        <span class="badge" id="autoplayBadge">CJET IS DISPATCHING</span>
       </div>
       <canvas id="sim" width="500" height="500"></canvas>
       <div class="chips">
@@ -109,7 +109,7 @@
         <button id="startBtn" class="primary">Start / Restart</button>
         <button id="pauseBtn">Pause</button>
         <span class="ctl"><input type="checkbox" id="autoplay" checked>
-          <label for="autoplay">Laya dispatch <span style="color:var(--muted)">(off = greedy nearest-bus)</span></label></span>
+          <label for="autoplay">CJet dispatch <span style="color:var(--muted)">(off = greedy nearest-bus)</span></label></span>
         <span class="ctl"><label>Model</label>
           <select id="model">
             <option value="auto">auto</option>
@@ -129,12 +129,12 @@
   <section>
     <div id="banner" class="banner"></div>
     <div class="panel">
-      <h2>Laya's view — the dispatch state it receives</h2>
+      <h2>CJet's view — the dispatch state it receives</h2>
       <span id="whoAsked"></span>
       <div id="stateView">not started yet</div>
     </div>
     <div class="panel">
-      <h2>Laya's decisions — which bus takes the demand</h2>
+      <h2>CJet's decisions — which bus takes the demand</h2>
       <div id="decisionBars"></div>
       <div class="meta" id="decisionMeta">no assignments yet</div>
       <div id="history"></div>
@@ -285,11 +285,11 @@ function greedyAssign(passenger) {
 }
 
 async function dispatch(passenger) {
-  const useLaya = document.getElementById("autoplay").checked;
-  if (useLaya) {
-    const bus = await askLaya(passenger);
+  const useCJet = document.getElementById("autoplay").checked;
+  if (useCJet) {
+    const bus = await askCJet(passenger);
     if (bus) { assignTo(bus, passenger); return; }
-    // laya failed (error path) -> keep the fleet running with the heuristic
+    // CJet failed (error path) -> keep the fleet running with the heuristic
   }
   assignTo(greedyAssign(passenger), passenger);
 }
@@ -302,7 +302,7 @@ function assignTo(bus, passenger) {
   updateChips();
 }
 
-async function askLaya(passenger) {
+async function askCJet(passenger) {
   const state = buildState(passenger);
   document.getElementById("whoAsked").textContent = `Demand #${passenger.id} asked:`;
   document.getElementById("stateView").textContent = JSON.stringify(state, null, 2);
@@ -349,7 +349,7 @@ function renderDecision(passenger, bus, recommended, probs, confidence, latency)
     row.innerHTML =
       `<div class="bar-label">${BUSES[label.slice(4).toUpperCase()].label}</div>` +
       `<div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>` +
-      `<div class="bar-label">${pct}%${label === `bus_${bus.id.toLowerCase()}` ? " ← laya" : ""}</div>`;
+      `<div class="bar-label">${pct}%${label === `bus_${bus.id.toLowerCase()}` ? " ← CJet" : ""}</div>`;
     bars.appendChild(row);
   }
   document.getElementById("decisionMeta").textContent =

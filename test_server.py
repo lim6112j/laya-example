@@ -144,7 +144,7 @@ def test_index_served(client):
     test_client, _ = client
     response = test_client.get("/")
     assert response.status_code == 200
-    assert "laya web UI" in response.text
+    assert "CJet web UI" in response.text
 
 
 def test_concurrent_predictions_are_serialized(client, monkeypatch):

@@ -25,12 +25,15 @@ long-lived FastAPI server (the ~7s model preload happens once at startup):
 uv run uvicorn server:app
 ```
 
-Then open http://localhost:8000. Pick one of ten built-in examples (5 English,
-5 Korean) from the dropdown to autofill both the state and the question cards,
-or enter the state as JSON and build questions with the form (type `choice` /
-`score` / `noul`, instructions, and per-option criteria rows). Optionally
-override the model checkpoint and run: results render per question with
-probability bars and the routing metadata (model, repo, reason, latency).
+Then open http://localhost:8000. Pick one of twenty built-in examples from the
+domain-grouped dropdown (support tickets in English/Korean, plus laya's
+pre-tuned preset workflows — email triage, prompt guardrails, content
+moderation, model routing — with one benign and one flagged example each) to
+autofill both the state and the question cards, or enter the state as JSON and
+build questions with the form (type `choice` / `score` / `noul`, instructions,
+and per-option criteria rows). Optionally override the model checkpoint and
+run: results render per question with probability bars and the routing
+metadata (model, repo, reason, latency).
 
 - `server.py` — FastAPI app; `POST /api/predict` validates the payload against
   laya's question schema with pydantic (choice → dict criteria, score → list,

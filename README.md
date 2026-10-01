@@ -16,6 +16,30 @@ uv run python main.py
 The three checkpoints (`english`, `multilingual`, `typed-decisions`) are
 downloaded from Hugging Face on first use and cached in `~/.cache/huggingface`.
 
+## Web UI
+
+A browser UI for the same state / questions → result flow, backed by a
+long-lived FastAPI server (the ~7s model preload happens once at startup):
+
+```sh
+uv run uvicorn server:app
+```
+
+Then open http://localhost:8000. Pick one of ten built-in examples (5 English,
+5 Korean) from the dropdown to autofill both the state and the question cards,
+or enter the state as JSON and build questions with the form (type `choice` /
+`score` / `noul`, instructions, and per-option criteria rows). Optionally
+override the model checkpoint and run: results render per question with
+probability bars and the routing metadata (model, repo, reason, latency).
+
+- `server.py` — FastAPI app; `POST /api/predict` validates the payload against
+  laya's question schema with pydantic (choice → dict criteria, score → list,
+  noul → none) and serves `static/index.html`
+- `laya_startup.py` — shared startup used by both `main.py` and the server
+  (offline hub + fast-build monkeypatch + preload; see below)
+- `test_server.py` — stubbed-API tests, no model load:
+  `uv run pytest test_server.py`
+
 ## Sensor anomaly detection
 
 `sensor_anomaly_detection.py` is a standalone, stdlib-only script (no laya

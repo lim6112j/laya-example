@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>laya — state / questions → result</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #d9dde3;
+    --text: #1c2128;
+    --muted: #6b7280;
+    --accent: #4f46e5;
+    --accent-soft: #eef2ff;
+    --danger: #b91c1c;
+    --danger-bg: #fef2f2;
+    --ok: #047857;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { margin: 0; font-size: 17px; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  main {
+    display: grid; grid-template-columns: minmax(380px, 5fr) minmax(360px, 4fr);
+    gap: 20px; padding: 20px 24px; max-width: 1280px; margin: 0 auto;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-bottom: 20px;
+  }
+  .panel h2 { margin: 0 0 12px; font-size: 14px; text-transform: uppercase;
+    letter-spacing: 0.04em; color: var(--muted); }
+  textarea, input[type="text"], select {
+    width: 100%; border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; font: inherit; color: var(--text); background: #fff;
+  }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px; min-height: 130px; resize: vertical; }
+  textarea:focus, input:focus, select:focus { outline: 2px solid var(--accent);
+    outline-offset: -1px; border-color: var(--accent); }
+  button {
+    font: inherit; border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 12px; background: #fff; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+    font-weight: 600; padding: 10px 18px; font-size: 15px;
+  }
+  button.primary:hover { opacity: 0.9; color: #fff; }
+  button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.ghost { border: none; background: none; color: var(--accent); padding: 2px 6px; }
+  button.ghost:hover { text-decoration: underline; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .toolbar { display: flex; gap: 8px; margin-top: 8px; }
+  .qcard { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+  .qcard .head { display: flex; gap: 8px; margin-bottom: 8px; }
+  .qcard .head input { flex: 2; }
+  .qcard .head select { flex: 1; }
+  .qcard .head button { flex: 0; }
+  .crit-row { display: flex; gap: 8px; margin-top: 6px; }
+  .crit-row .label-input { flex: 1; }
+  .crit-row .desc-input { flex: 2; }
+  .crit-row button { flex: 0; }
+  .result-card { border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; margin-bottom: 10px; }
+  .result-card .qid { font-weight: 600; }
+  .result-card .answer { font-size: 15px; font-weight: 600; color: var(--accent); margin: 4px 0; }
+  .bar { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .bar .bar-label { flex: 0 0 34%; color: var(--muted); font-size: 12px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bar .bar-track { flex: 1; height: 10px; background: var(--accent-soft);
+    border-radius: 5px; overflow: hidden; }
+  .bar .bar-fill { height: 100%; background: var(--accent); border-radius: 5px; }
+  .bar.winner .bar-label { color: var(--text); font-weight: 600; }
+  .bar.winner .bar-fill { background: var(--ok); }
+  .meter { height: 14px; border-radius: 7px; background: var(--accent-soft);
+    overflow: hidden; margin: 6px 0; }
+  .meter > div { height: 100%; border-radius: 7px; }
+  .meter .low { background: var(--ok); }
+  .meter .high { background: var(--danger); }
+  .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .routing { color: var(--muted); font-size: 13px; }
+  .routing strong { color: var(--text); }
+  .banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 12px;
+    display: none; white-space: pre-wrap; }
+  .banner.error { display: block; background: var(--danger-bg);
+    color: var(--danger); border: 1px solid #fecaca; }
+  .empty { color: var(--muted); font-style: italic; }
+  #run { width: 100%; }
+</style>
+</head>
+<body>
+<header>
+  <h1>laya web UI</h1>
+  <p>State + typed questions → fast non-autoregressive decisions (choice / score / yes-no)</p>
+</header>
+<main>
+  <section>
+    <div class="panel">
+      <h2>State</h2>
+      <textarea id="state" spellcheck="false"></textarea>
+      <div class="toolbar">
+        <select id="exampleSelect" onchange="applyExample(this.value)">
+          <option value="">Examples…</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Questions</h2>
+      <div id="questions"></div>
+      <button type="button" onclick="addQuestion()">+ Add question</button>
+    </div>
+
+    <div class="panel">
+      <h2>Run</h2>
+      <div class="row">
+        <label style="flex:0; white-space:nowrap;">Model</label>
+        <select id="model">
+          <option value="auto">auto</option>
+          <option value="english">english</option>
+          <option value="multilingual">multilingual</option>
+          <option value="typed-decisions">typed-decisions</option>
+        </select>
+      </div>
+      <div style="margin-top: 12px;">
+        <button id="run" class="primary" onclick="runPredict()">Predict</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div id="banner" class="banner"></div>
+    <div class="panel">
+      <h2>Result</h2>
+      <div id="results"><p class="empty">Run a prediction to see results.</p></div>
+    </div>
+    <div class="panel" id="routingPanel" style="display:none;">
+      <h2>Routing</h2>
+      <div id="routing" class="routing"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+const DEFAULT_QUESTIONS = [
+  { qid: "department", type: "choice", instructions: "Which department should handle this request?",
+    criteria: [
+      ["billing", "invoices, payments, refunds"],
+      ["technical", "bugs, outages, system errors"],
+      ["sales", "pricing, new contracts"],
+      ["other", "everything else"],
+    ] },
+  { qid: "urgency", type: "score", instructions: "How urgent is this request?",
+    criteria: [["not urgent"], ["soon"], ["critical deadline or blocking issue"]] },
+  { qid: "churn_risk", type: "noul", instructions: "Does the user threaten to cancel or leave?" },
+  { qid: "refund_requested", type: "noul", instructions: "Does the user explicitly request a refund?" },
+];
+
+// Example scenarios: each autofills both the state and the question cards.
+const EXAMPLES = [
+  {
+    id: "en-refund", label: "Duplicate charge — refund request", language: "English",
+    state: {
+      from: "user@acme.com",
+      subject: "Duplicate charge on invoice #4411",
+      body: "Hi, we were billed twice for March. Please refund the duplicate today or we will cancel our plan.",
+    },
+    questions: DEFAULT_QUESTIONS,
+  },
+  {
+    id: "en-outage", label: "Production outage — bug report", language: "English",
+    state: {
+      from: "ops@acme.com",
+      subject: "API down since 9am UTC — every request 500s",
+      body: "Our production is completely down since this morning's deploy. Every request returns 500 errors and we are losing revenue every minute this stays broken.",
+    },
+    questions: [
+      { qid: "department", type: "choice", instructions: "Which department should handle this request?",
+        criteria: [["technical", "bugs, outages, system errors"], ["other", "everything else"]] },
+      { qid: "severity", type: "score", instructions: "How severe is the reported issue?",
+        criteria: [["minor inconvenience"], ["degraded service"], ["critical outage"]] },
+      { qid: "production_down", type: "noul", instructions: "Is the user's production system unavailable?" },
+    ],
+  },
+  {
+    id: "en-sales", label: "Pricing & new contract inquiry", language: "English",
+    state: {
+      from: "procurement@bigco.com",
+      subject: "Team plan pricing for 200 seats",
+      body: "We are evaluating your product for a 200-seat team and need a quote, contract terms, and enterprise discounts. Could sales contact us this week?",
+    },
+    questions: [
+      { qid: "department", type: "choice", instructions: "Which department should handle this request?",
+        criteria: [
+          ["billing", "invoices, payments, refunds"],
+          ["technical", "bugs, outages, system errors"],
+          ["sales", "pricing, new contracts"],
+          ["other", "everything else"],
+        ] },
+      { qid: "urgency", type: "score", instructions: "How urgent is this request?",
+        criteria: [["not urgent"], ["soon"], ["critical deadline or blocking issue"]] },
+    ],
+  },
+  {
+    id: "en-churn", label: "Churn threat — angry customer", language: "English",
+    state: {
+      from: "angry@acme.com",
+      subject: "Third failure this month — cancel my account",
+      body: "This is the third time this month your service has failed us. We are done. Cancel our account and refund the last three months immediately.",
+    },
+    questions: DEFAULT_QUESTIONS,
+  },
+  {
+    id: "en-feature", label: "Feature request — no rush", language: "English",
+    state: {
+      from: "happy@acme.com",
+      subject: "Dark mode support",
+      body: "Love the product! It would be great to have a dark mode in the dashboard. No rush at all, keep up the good work.",
+    },
+    questions: [
+      { qid: "department", type: "choice", instructions: "Which department should handle this request?",
+        criteria: [
+          ["billing", "invoices, payments, refunds"],
+          ["technical", "bugs, outages, system errors"],
+          ["sales", "pricing, new contracts"],
+          ["other", "everything else"],
+        ] },
+      { qid: "urgency", type: "score", instructions: "How urgent is this request?",
+        criteria: [["not urgent"], ["soon"], ["critical deadline or blocking issue"]] },
+    ],
+  },
+  {
+    id: "ko-refund", label: "중복 결제 환불 요청", language: "한국어",
+    state: {
+      from: "user@acme.com",
+      subject: "중복 결제 환불 요청",
+      body: "안녕하세요, 3월 요금이 두 번 청구되었습니다. 중복 결제분을 오늘 안으로 환불해 주시지 않으면 서비스를 해지하겠습니다.",
+    },
+    questions: DEFAULT_QUESTIONS,
+  },
+  {
+    id: "ko-outage", label: "서비스 장애 보고", language: "한국어",
+    state: {
+      from: "ops@acme.com",
+      subject: "오늘 아침부터 API 전면 장애",
+      body: "오늘 아침 9시부터 API가 전면 다운되어 모든 요청이 500 오류를 반환합니다. 서비스가 중단된 매 분마다 매출 손실이 발생하고 있습니다. 긴급 조치가 필요합니다.",
+    },
+    questions: [
+      { qid: "department", type: "choice", instructions: "Which department should handle this request?",
+        criteria: [["technical", "bugs, outages, system errors"], ["other", "everything else"]] },
+      { qid: "severity", type: "score", instructions: "How severe is the reported issue?",
+        criteria: [["minor inconvenience"], ["degraded service"], ["critical outage"]] },
+      { qid: "production_down", type: "noul", instructions: "Is the user's production system unavailable?" },
+    ],
+  },
+  {
+    id: "ko-sales", label: "요금제 및 계약 문의", language: "한국어",
+    state: {
+      from: "procurement@bigco.com",
+      subject: "200석 팀 플랜 견적 문의",
+      body: "200명 규모의 팀을 위해 제품을 검토 중입니다. 견적, 계약 조건, 엔터프라이즈 할인 안내를 부탁드립니다. 이번 주 안에 영업팀에서 연락 주시면 감사하겠습니다.",
+    },
+    questions: [
+      { qid: "department", type: "choice", instructions: "Which department should handle this request?",
+        criteria: [
+          ["billing", "invoices, payments, refunds"],
+          ["technical", "bugs, outages, system errors"],
+          ["sales", "pricing, new contracts"],
+          ["other", "everything else"],
+        ] },
+      { qid: "urgency", type: "score", instructions: "How urgent is this request?",
+        criteria: [["not urgent"], ["soon"], ["critical deadline or blocking issue"]] },
+    ],
+  },
+  {
+    id: "ko-misc", label: "배송 및 계정 문의", language: "한국어",
+    state: {
+      from: "customer@acme.com",
+      subject: "주문한 물건이 아직 도착하지 않았습니다",
+      body: "지난주에 주문한 물건이 아직 도착하지 않았습니다. 배송 조회가 되지 않고, 계정에서도 주문 상태를 확인할 수 없습니다. 확인 부탁드립니다.",
+    },
+    questions: [
+      { qid: "department", type: "choice", instructions: "Which department should handle this request?",
+        criteria: [
+          ["billing", "invoices, payments, refunds"],
+          ["technical", "bugs, outages, system errors"],
+          ["sales", "pricing, new contracts"],
+          ["other", "everything else"],
+        ] },
+      { qid: "urgency", type: "score", instructions: "How urgent is this request?",
+        criteria: [["not urgent"], ["soon"], ["critical deadline or blocking issue"]] },
+    ],
+  },
+  {
+    id: "ko-churn", label: "서비스 해지 위협", language: "한국어",
+    state: {
+      from: "angry@acme.com",
+      subject: "이번 달 세 번째 장애 — 계정 해지 요청",
+      body: "이번 달에만 세 번이나 장애가 발생했습니다. 더 이상 참을 수 없습니다. 계정을 해지하고 최근 3개월 요금을 전액 환불해 주세요.",
+    },
+    questions: DEFAULT_QUESTIONS,
+  },
+];
+
+let questions = [];
+
+function el(tag, attrs = {}, children = []) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k === "text") node.textContent = v;
+    else node.setAttribute(k, v);
+  }
+  for (const child of children) node.appendChild(child);
+  return node;
+}
+
+function makeInput(value, placeholder) {
+  const input = el("input", { type: "text", placeholder: placeholder || "" });
+  input.value = value || "";
+  return input;
+}
+
+// ---- question cards -------------------------------------------------------
+
+function addQuestion(q = {}) {
+  const card = el("div", { class: "qcard" });
+  const head = el("div", { class: "head" });
+  head.appendChild(makeInput(q.qid, "question id (e.g. department)"));
+  const typeSelect = el("select", {});
+  for (const t of ["choice", "score", "noul"]) {
+    const opt = el("option", { value: t, text: t });
+    typeSelect.appendChild(opt);
+  }
+  typeSelect.value = q.type || "choice";
+  head.appendChild(typeSelect);
+  const removeBtn = el("button", { type: "button", text: "✕", title: "Remove question" });
+  removeBtn.addEventListener("click", () => card.remove());
+  head.appendChild(removeBtn);
+  card.appendChild(head);
+
+  const instructions = makeInput(q.instructions, "instructions / prompt");
+  card.appendChild(instructions);
+
+  const critBox = el("div", {});
+  card.appendChild(critBox);
+
+  function addCriterion(pair = ["", ""]) {
+    const row = el("div", { class: "crit-row" });
+    const label = makeInput(pair[0], typeSelect.value === "choice" ? "option label" : "level label");
+    row.appendChild(label);
+    if (typeSelect.value === "choice") {
+      const desc = makeInput(pair[1], "what this option means");
+      row.appendChild(desc);
+    }
+    const remove = el("button", { type: "button", text: "✕" });
+    remove.addEventListener("click", () => row.remove());
+    row.appendChild(remove);
+    critBox.appendChild(row);
+  }
+
+  function syncCriteria() {
+    const need = typeSelect.value === "noul" ? 0 : 1;
+    while (critBox.children.length < need) addCriterion();
+    while (critBox.children.length > Math.max(need, 0) && typeSelect.value === "noul") {
+      critBox.lastChild.remove();
+    }
+    if (typeSelect.value === "score" && critBox.children.length === 1) {
+      // score questions come with a default 3-level rubric
+      while (critBox.children.length < 3) addCriterion();
+    }
+    for (const row of critBox.children) {
+      const labelInput = row.querySelector("input");
+      const hasDesc = row.querySelectorAll("input").length > 1;
+      if (typeSelect.value === "choice" && !hasDesc) {
+        const desc = makeInput("", "what this option means");
+        row.insertBefore(desc, row.lastChild);
+      }
+      if (typeSelect.value !== "choice" && hasDesc) {
+        row.querySelector("input:nth-of-type(2)").remove();
+        labelInput.placeholder = "level label";
+      }
+    }
+    card.dataset.type = typeSelect.value;
+  }
+
+  typeSelect.addEventListener("change", syncCriteria);
+  if (q.criteria) for (const pair of q.criteria) addCriterion(pair);
+  syncCriteria();
+  document.getElementById("questions").appendChild(card);
+}
+
+function collectQuestions() {
+  const out = {};
+  const ids = [];
+  for (const card of document.querySelectorAll("#questions .qcard")) {
+    const [qidInput] = card.querySelectorAll(".head input");
+    const qid = qidInput.value.trim();
+    if (!qid) throw new Error("Every question needs a name (question id).");
+    if (ids.includes(qid)) throw new Error(`Duplicate question id: "${qid}".`);
+    ids.push(qid);
+    const type = card.querySelector(".head select").value;
+    const instructions = card.querySelector("input[placeholder^='instructions']").value.trim();
+    if (!instructions) throw new Error(`Question "${qid}" needs instructions.`);
+    const q = { type, instructions };
+    if (type === "choice") {
+      const criteria = {};
+      for (const row of card.querySelectorAll(".crit-row")) {
+        const [labelInput, descInput] = row.querySelectorAll("input");
+        const label = labelInput.value.trim();
+        if (label) criteria[label] = descInput ? descInput.value.trim() : "";
+      }
+      if (!Object.keys(criteria).length) {
+        throw new Error(`Question "${qid}" is type choice and needs at least one option.`);
+      }
+      q.criteria = criteria;
+    } else if (type === "score") {
+      const criteria = [];
+      for (const row of card.querySelectorAll(".crit-row")) {
+        const label = row.querySelector("input").value.trim();
+        if (label) criteria.push(label);
+      }
+      if (!criteria.length) {
+        throw new Error(`Question "${qid}" is type score and needs at least one level.`);
+      }
+      q.criteria = criteria;
+    }
+    out[qid] = q;
+  }
+  if (!Object.keys(out).length) throw new Error("Add at least one question.");
+  return out;
+}
+
+// ---- example scenarios ----------------------------------------------------
+
+function populateExampleSelect() {
+  const select = document.getElementById("exampleSelect");
+  for (const language of ["English", "한국어"]) {
+    const group = el("optgroup", { label: language });
+    for (const example of EXAMPLES.filter(e => e.language === language)) {
+      group.appendChild(el("option", { value: example.id, text: example.label }));
+    }
+    select.appendChild(group);
+  }
+}
+
+function applyExample(id) {
+  const example = EXAMPLES.find(e => e.id === id);
+  if (!example) return;
+  document.getElementById("state").value = JSON.stringify(example.state, null, 2);
+  document.getElementById("questions").innerHTML = "";
+  for (const q of example.questions) addQuestion(q);
+  clearError();
+  // reset so re-picking the same example fires onchange again
+  document.getElementById("exampleSelect").value = "";
+}
+
+// ---- prediction -----------------------------------------------------------
+
+function showError(message) {
+  const banner = document.getElementById("banner");
+  banner.textContent = message;
+  banner.className = "banner error";
+}
+
+function clearError() {
+  const banner = document.getElementById("banner");
+  banner.textContent = "";
+  banner.className = "banner";
+}
+
+async function runPredict() {
+  clearError();
+  let state, questionsPayload;
+  try {
+    state = JSON.parse(document.getElementById("state").value);
+    if (typeof state !== "object" || state === null || Array.isArray(state)) {
+      throw new Error("State must be a JSON object (e.g. {\"subject\": \"...\"}).");
+    }
+    questionsPayload = collectQuestions();
+  } catch (err) {
+    showError(err instanceof SyntaxError
+      ? "State is not valid JSON: " + err.message
+      : err.message);
+    return;
+  }
+
+  const runBtn = document.getElementById("run");
+  runBtn.disabled = true;
+  runBtn.textContent = "Predicting…";
+  try {
+    const response = await fetch("/api/predict", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        state,
+        questions: questionsPayload,
+        model: document.getElementById("model").value,
+      }),
+    });
+    const body = await response.json();
+    if (!response.ok) {
+      const detail = body.detail !== undefined
+        ? (typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail, null, 2))
+        : response.statusText;
+      showError(`Request failed (${response.status}): ${detail}`);
+      return;
+    }
+    renderResult(body);
+  } catch (err) {
+    showError("Request failed: " + err.message);
+  } finally {
+    runBtn.disabled = false;
+    runBtn.textContent = "Predict";
+  }
+}
+
+// ---- result rendering -----------------------------------------------------
+
+function bar(label, value, winner) {
+  const pct = (value * 100).toFixed(1);
+  const row = el("div", { class: "bar" + (winner ? " winner" : "") });
+  row.appendChild(el("div", { class: "bar-label", text: label }));
+  const track = el("div", { class: "bar-track" });
+  track.appendChild(el("div", { class: "bar-fill", style: `width:${pct}%` }));
+  row.appendChild(track);
+  row.appendChild(el("div", { class: "bar-label", text: pct + "%" }));
+  return row;
+}
+
+function answerCard(qid, answer) {
+  const card = el("div", { class: "result-card" });
+  card.appendChild(el("div", { class: "qid", text: qid }));
+
+  if (answer.type === "choice") {
+    card.appendChild(el("div", { class: "answer", text: answer.choice }));
+    const probs = Object.entries(answer.probabilities || {}).sort((a, b) => b[1] - a[1]);
+    for (const [label, value] of probs) {
+      card.appendChild(bar(label, value, label === answer.choice));
+    }
+  } else if (answer.type === "score") {
+    const legend = answer.legend || {};
+    const idx = Math.round(answer.score);
+    const meaning = legend[String(idx)] !== undefined ? legend[String(idx)] : "";
+    card.appendChild(el("div", { class: "answer",
+      text: `${answer.score}${meaning ? " — " + meaning : ""}` }));
+    const probs = Object.entries(answer.probabilities || {}).sort((a, b) => b[0] - a[0]);
+    for (const [idxStr, value] of probs) {
+      const label = `${idxStr}: ${legend[idxStr] || ""}`;
+      card.appendChild(bar(label, value, Number(idxStr) === idx));
+    }
+  } else {
+    const p = answer.noul;
+    const pct = (p * 100).toFixed(1);
+    card.appendChild(el("div", { class: "answer",
+      text: `true — ${pct}%` + (p < 0.5 ? " (lean false)" : "") }));
+    const meter = el("div", { class: "meter" });
+    meter.appendChild(el("div", {
+      class: p >= 0.5 ? "high" : "low",
+      style: `width:${pct}%`,
+    }));
+    card.appendChild(meter);
+  }
+  const metaParts = [`confidence ${answer.confidence}`];
+  if (answer.answer_confidence !== undefined) {
+    metaParts.push(`answer_confidence ${answer.answer_confidence}`);
+  }
+  card.appendChild(el("div", { class: "meta", text: metaParts.join(" · ") }));
+  return card;
+}
+
+function renderResult(body) {
+  const results = document.getElementById("results");
+  results.innerHTML = "";
+  const answers = (body.result && body.result.answers) || {};
+  for (const [qid, answer] of Object.entries(answers)) {
+    results.appendChild(answerCard(qid, answer));
+  }
+  if (!Object.keys(answers).length) {
+    results.innerHTML = "";
+    results.appendChild(el("p", { class: "empty", text: "No answers returned." }));
+  }
+
+  const routing = body.result && body.result.routing;
+  const routingPanel = document.getElementById("routingPanel");
+  if (routing) {
+    routingPanel.style.display = "";
+    const box = document.getElementById("routing");
+    box.innerHTML = "";
+    box.appendChild(el("div", {},
+      [el("strong", { text: "model: " }), document.createTextNode(routing.model || "-")]));
+    if (routing.repo) {
+      box.appendChild(el("div", {},
+        [el("strong", { text: "repo: " }), document.createTextNode(routing.repo)]));
+    }
+    if (routing.reason) {
+      box.appendChild(el("div", {},
+        [el("strong", { text: "reason: " }), document.createTextNode(routing.reason)]));
+    }
+    box.appendChild(el("div", { class: "meta", text: `latency: ${body.latency_ms} ms` }));
+  }
+}
+
+// ---- init -----------------------------------------------------------------
+
+populateExampleSelect();
+applyExample(EXAMPLES[0].id);
+</script>
+</body>
+</html>

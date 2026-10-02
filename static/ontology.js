@@ -236,37 +236,50 @@ export function reason(facts, { extensions = {} } = {}) {
   //
   // This was a real bug, found by this check: the reasoner read the declared limit and
   // ignored the configured one, so a bus given seats: 1 was still checked against 4.
-  const configured = facts.seats ?? cap.value;
-  const limit = Math.min(cap.value, configured);
-  if (configured !== cap.value) {
-    violations.push({
-      axiom: cap.id,
-      subject: "fleet",
-      detail: `configured seat limit ${configured} disagrees with the TBox's ${cap.value}; ` +
-              `enforcing the stricter ${limit}`,
-    });
-  }
-  for (const [id, ind] of facts.individuals) {
-    if (ind.type !== "Bus") continue;
-    if (ind.onboardPassenger.size > limit) {
+  //
+  // And if the axiom has been deleted — which the live TBox editor lets you do — there is
+  // no declared limit at all. An unasserted constraint is no constraint: the check is
+  // skipped and the fact is reported, rather than crashing on a missing axiom or, worse,
+  // quietly falling back to a number nobody wrote down.
+  const configured = facts.seats;
+  const unasserted = [];
+  if (!cap) {
+    // Deleted axiom: the ontology asserts no capacity at all, so it enforces none. The
+    // hand-written path still refuses over-capacity assignments, which is the point —
+    // turning the axiom off is what the demonstration is for.
+    unasserted.push("bus-capacity");
+  } else {
+    const limit = Math.min(cap.value, configured);
+    if (configured !== cap.value) {
       violations.push({
         axiom: cap.id,
-        subject: id,
-        detail: `carries ${ind.onboardPassenger.size} passengers, at most ${limit} allowed`,
+        subject: "fleet",
+        detail: `configured seat limit ${configured} disagrees with the TBox's ${cap.value}; ` +
+                `enforcing the stricter ${limit}`,
       });
     }
-  }
-  for (const bus of facts.individuals.values()) {
-    if (bus.type !== "Bus") continue;
-    for (const [i, step] of facts.occupancy.entries()) {
-      if (step.riding.size <= limit) continue;
-      violations.push({
-        axiom: cap.id,
-        subject: bus.id,
-        detail: `carries ${step.riding.size} passengers after stop ${i + 1} ` +
-                `at ${cellKey(step.at)}, at most ${limit} allowed`,
-      });
-      break;   // one report per bus is enough to fail the assignment
+    for (const [id, ind] of facts.individuals) {
+      if (ind.type !== "Bus") continue;
+      if (ind.onboardPassenger.size > limit) {
+        violations.push({
+          axiom: cap.id,
+          subject: id,
+          detail: `carries ${ind.onboardPassenger.size} passengers, at most ${limit} allowed`,
+        });
+      }
+    }
+    for (const bus of facts.individuals.values()) {
+      if (bus.type !== "Bus") continue;
+      for (const [i, step] of facts.occupancy.entries()) {
+        if (step.riding.size <= limit) continue;
+        violations.push({
+          axiom: cap.id,
+          subject: bus.id,
+          detail: `carries ${step.riding.size} passengers after stop ${i + 1} ` +
+                  `at ${cellKey(step.at)}, at most ${limit} allowed`,
+        });
+        break;   // one report per bus is enough to fail the assignment
+      }
     }
   }
 
@@ -321,7 +334,7 @@ export function reason(facts, { extensions = {} } = {}) {
     if (bus) derived.detour = extensions.detour(bus, demand);
   }
 
-  return { consistent: violations.length === 0, violations, derived };
+  return { consistent: violations.length === 0, violations, unasserted, derived };
 }
 
 /**
@@ -337,5 +350,10 @@ export function canServe(bus, stops, seats, demand = null, extensions = {}) {
   // belongs — in the backlog assertions, not in per-bus feasibility.
   const probe = reason(facts, { extensions });
   const blocking = probe.violations.filter(v => v.axiom !== "demand-must-be-served");
-  return { ok: blocking.length === 0, violations: blocking, detour: probe.derived.detour };
+  return {
+    ok: blocking.length === 0,
+    violations: blocking,
+    unasserted: probe.unasserted,
+    detour: probe.derived.detour,
+  };
 }

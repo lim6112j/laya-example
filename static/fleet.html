@@ -64,6 +64,36 @@
   .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
   #rulesView { background: var(--accent-soft); color: var(--accent); padding: 8px 10px;
     border-radius: 6px; margin-bottom: 10px; }
+  details.panel > summary { cursor: pointer; font-weight: 600; color: var(--muted);
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; }
+  details.panel > summary strong { color: var(--accent); text-transform: none;
+    letter-spacing: 0; font-size: 14px; }
+  #ontologyPanel { margin-top: 12px; }
+  #ontologyPanel h2 { margin: 14px 0 6px; }
+  .axiom { display: grid; grid-template-columns: 1fr 72px 24px; gap: 8px;
+    align-items: center; padding: 5px 0; border-bottom: 1px dashed var(--border); }
+  .axtext { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .axval { width: 72px; font: inherit; padding: 2px 6px; border: 1px solid var(--border);
+    border-radius: 4px; }
+  .axfixed { background: var(--bg); color: var(--muted); padding-top: 3px; }
+  .axnone { color: var(--muted); font-size: 11px; text-align: right; padding-right: 4px; }
+  .axdel, .axbtn { border: 1px solid var(--border); background: #fff; cursor: pointer;
+    border-radius: 4px; padding: 2px 8px; font: inherit; font-size: 12px; }
+  .axdel:hover, .axbtn:hover { border-color: var(--accent); color: var(--accent); }
+  .axnote { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
+  .axadd { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+  .axadd select, .axadd input { font: inherit; font-size: 12px; padding: 2px 4px;
+    border: 1px solid var(--border); border-radius: 4px; }
+  .axaddlbl { color: var(--muted); font-size: 12px; }
+  .axmsg { color: var(--muted); font-size: 11px; }
+  .ok { color: var(--ok); font-size: 12px; margin: 6px 0; }
+  .bad { color: var(--danger); font-size: 12px; margin: 6px 0; }
+  .warn { color: #a16207; font-size: 12px; margin: 6px 0; }
+  .abox { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    color: var(--muted); }
+  .abrow { padding: 2px 0; }
+  .axenforce { margin-top: 12px; display: flex; align-items: center; gap: 6px; }
+  .axreset { margin-top: 10px; }
   #whoAsked { font-weight: 600; color: var(--accent); margin-bottom: 6px; display: block; }
   #stateView { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 12px; background: #f3f4f6; border: 1px solid var(--border);
@@ -140,6 +170,10 @@
           <label id="speedLabel">14 cells/s</label></span>
       </div>
     </div>
+    <details class="panel">
+      <summary><strong>Ontology</strong> — the TBox behind the seat rule, editable</summary>
+      <div id="ontologyPanel"></div>
+    </details>
   </section>
 
   <section>
@@ -171,6 +205,8 @@ import {
   buildState, buildQuestion,
   rankedByNearest, greedyAssign, cellText, manhattan, busPos, plannedPath, RULES,
 } from "/fleet_sim.js";
+import { canServe as ontologyCanServe } from "/ontology.js";
+import { mountOntologyPanel } from "/ontology_panel.js";
 
 const CELL = 10;                       // 50 x 50 cells at 10 px = 500 px canvas
 const W = GRID * CELL, H = GRID * CELL;
@@ -520,6 +556,9 @@ function startSim() {
     speed: Number(document.getElementById("speed").value),
     demandEvery: Number(document.getElementById("demandEvery").value),
     multiPickup: document.getElementById("multiPickup").checked,
+    // Carried across the restart, or the ontology toggle would reset itself every time
+    // the run restarts — including the restart it triggers.
+    feasibility: sim.config.feasibility,
   }});
   decided = 0; deferred = 0; unserved = 0; retryCooldown = 0; retryBusy = false;
   running = true; paused = false;
@@ -538,6 +577,27 @@ function startSim() {
   dispatch(newDemand(sim));
   dispatch(newDemand(sim));
 }
+
+// ---- ontology panel ----------------------------------------------------------
+// Every mutation here restarts the run on the same seed. That is what makes the
+// enforcement toggle a demonstration rather than a switch: same seed, both constraint
+// layers, and the delivered count should match, because divergence was measured at 0
+// over 600 bus/demand pairs. Changing the seat limit mid-run would leave routes
+// planned under the old limit, so restarting is the honest response to both.
+
+const ontologyPanel = mountOntologyPanel({
+  root: document.getElementById("ontologyPanel"),
+  getSim: () => sim,
+  onChange: (what) => {
+    if (what === "enforce") {
+      sim.config.feasibility = (cand, bus) => ontologyCanServe(bus, cand, RULES.seats).ok;
+    } else if (what === "unenforce") {
+      sim.config.feasibility = undefined;
+    }
+    startSim();
+    ontologyPanel.rerender();
+  },
+});
 
 function updateAutoplayBadge() {
   document.getElementById("autoplayBadge").className =

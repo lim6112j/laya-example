@@ -15,6 +15,13 @@ import assert from "node:assert/strict";
 import {
   TBOX, VOCABULARY, axiom, checkTBox, buildABox, reason, canServe,
 } from "./static/ontology.js";
+import {
+  applySeatLimit, seatLimit, seatLimitAgrees, addAxiom, removeAxiom, resetTBox,
+  tboxStatus, aboxFor, describeAxiom, axiomFormOptions, classOptions, propertyOptions,
+} from "./static/ontology_panel.js";
+
+// Captured before any editor test runs, so a mutation cannot leak into later tests.
+const PRISTINE_SEATS_FALLBACK = RULES.seats;
 
 import {
   makeBus, createSim, step, newDemand, assignTo, insertStops, insertSeq,
@@ -253,6 +260,117 @@ test("reasoning cost is negligible against the 136 ms decision baseline", () => 
   // insertSeq calls the predicate per candidate route, ~45 per decision, so this budget
   // is per-call generous by design: the whole search must stay well under a millisecond.
   assert.ok(perCallUs < 100, `reasoning costs ${perCallUs.toFixed(1)} us per call`);
+});
+
+// ---- the live editor ----------------------------------------------------------
+// The panel mutates module state, so every test here restores the defaults on the way
+// out — otherwise a test that changes the seat limit would silently reconfigure every
+// test that runs after it.
+
+test.afterEach(() => resetTBox());
+
+test("deleting the seat axiom is reported, not crashed on", () => {
+  // The reasoner used to do axiom("bus-capacity").value unconditionally, so the editor
+  // making deletion reachable turned into a TypeError. An unasserted constraint is no
+  // constraint, and the fact is reported so the panel can say so.
+  removeAxiom("bus-capacity");
+  const bus = { id: "A", x: 0, y: 0, stops: [], onboard: new Set([1, 2, 3, 4, 5]), queue: [] };
+  const r = canServe(bus, [], RULES.seats);
+  assert.equal(r.ok, true, "with no axiom asserted the ontology enforces no capacity");
+  assert.deepEqual(r.unasserted, ["bus-capacity"]);
+  assert.deepEqual(tboxStatus().missing.map(m => m.id), ["bus-capacity"]);
+});
+
+test("deleting the seat axiom still leaves the hand-written path enforcing capacity", () => {
+  // The demonstration: the ontology stops enforcing capacity, the arithmetic does not.
+  removeAxiom("bus-capacity");
+  const bus = at(makeBus("A"), 0, 0);
+  const p = pax(1, pt(5, 0), pt(25, 0));
+  bus.onboard = new Set([2, 3, 4, 5]);
+  bus.stops = [2, 3, 4, 5].map(id => ({
+    kind: "dropoff", point: pt(20 + id, id), p: pax(id, pt(id, 0), pt(20 + id, id)),
+  }));
+  const stops = [mkStops(p), ...bus.stops, mkStops(p, "dropoff")];
+  assert.equal(canServe(bus, stops, RULES.seats).ok, true, "ontology: unconstrained");
+  assert.equal(capacityOk(stops, bus.onboard, RULES.seats), false, "hand-written: still refuses");
+});
+
+test("applySeatLimit moves the axiom and the simulator together", () => {
+  const before = RULES.seats;
+  applySeatLimit(2);
+  assert.equal(axiom("bus-capacity").value, 2, "TBox updated");
+  assert.equal(RULES.seats, 2, "simulator configuration follows");
+  assert.equal(seatLimitAgrees(), true, "no mismatch to report");
+  assert.ok(before !== 2);
+});
+
+test("a mismatch is visible rather than inferred", () => {
+  // Only reachable from code, which is the point: the editor writes both, so a
+  // disagreement means something changed one without the other.
+  axiom("bus-capacity").value = 6;
+  assert.equal(seatLimitAgrees(), false);
+  const r = canServe({ id: "A", x: 0, y: 0, stops: [], onboard: new Set(), queue: [] }, [], 4);
+  assert.ok(r.violations.some(v => /disagrees with the TBox/.test(v.detail)));
+});
+
+test("applySeatLimit on a removed axiom reports instead of pretending", () => {
+  removeAxiom("bus-capacity");
+  const r = applySeatLimit(3);
+  assert.equal(r.applied, false);
+  assert.match(r.reason, /removed/);
+  assert.equal(RULES.seats, PRISTINE_SEATS_FALLBACK, "the simulator's limit is left alone");
+});
+
+test("an added axiom that contradicts the declared one is rejected by the self-check", () => {
+  const r = addAxiom({ form: "minCardinality", subject: "Bus",
+                       property: "onboardPassenger", value: 6 });
+  assert.equal(r.ok, true);
+  const status = tboxStatus();
+  assert.equal(status.satisfiable, false, "the class cannot be satisfied");
+  assert.match(status.unsatisfiable[0].reason, /at least 6 and at most 4/);
+});
+
+test("a duplicate axiom is refused and a bad value is refused", () => {
+  assert.equal(addAxiom({ form: "range", subject: "Passenger",
+                          property: "pickup", value: "GridCell" }).ok, false);
+  assert.equal(addAxiom({ form: "maxCardinality", subject: "Demand",
+                          property: "servedBy", value: "nope" }).ok, false);
+});
+
+test("reset restores the declared defaults exactly", () => {
+  const original = JSON.stringify(TBOX);
+  applySeatLimit(1);
+  removeAxiom("bus-occupies-cell");
+  addAxiom({ form: "minCardinality", subject: "Bus", property: "onboardPassenger", value: 9 });
+  assert.notEqual(JSON.stringify(TBOX), original);
+  resetTBox();
+  assert.equal(JSON.stringify(TBOX), original, "byte-identical restore");
+  assert.equal(tboxStatus().satisfiable, true);
+  assert.equal(tboxStatus().missing.length, 0);
+});
+
+test("the editor's vocabulary options come from the declaration, not a duplicate list", () => {
+  assert.deepEqual(classOptions(), VOCABULARY.classes);
+  assert.deepEqual(propertyOptions(), VOCABULARY.properties);
+  assert.deepEqual(axiomFormOptions().map(f => f.value), ["maxCardinality", "minCardinality", "range"]);
+});
+
+test("describeAxiom renders every declared form readably", () => {
+  assert.equal(describeAxiom(axiom("bus-capacity")), "Bus ⊑ ≤4 onboardPassenger");
+  assert.equal(describeAxiom(axiom("demand-must-be-served")), "Demand ⊑ ≥1 servedBy");
+  assert.equal(describeAxiom(axiom("bus-occupies-cell")), "Bus.occupies ⊑ GridCell");
+  assert.equal(describeAxiom(axiom("passenger-single-state")), "Waiting ⊥ Riding ⊥ Delivered");
+});
+
+test("the ABox view reports what the ontology believes about each bus", () => {
+  const bus = at(makeBus("A"), 3, 4);
+  bus.onboard = new Set([7, 8]);
+  const [view] = aboxFor([bus]);
+  assert.equal(view.id, "Bus A");
+  assert.equal(view.position, "3, 4");
+  assert.deepEqual(view.aboard, [7, 8]);
+  assert.equal(view.violations.length, 0);
+  assert.deepEqual(view.unasserted, []);
 });
 
 // ---- vocabulary ---------------------------------------------------------------

@@ -132,7 +132,7 @@
         <span>Riding <strong id="riding">0</strong></span>
         <span>Delivered <strong id="delivered">0</strong></span>
         <span>Demands <strong id="demands">0</strong></span>
-        <span>No seat <strong id="backlog">0</strong></span>
+        <span title="demands waiting right now because no bus had a free seat">No room <strong id="backlog">0</strong></span>
         <span class="badge" id="autoplayBadge">CJET IS DISPATCHING</span>
       </div>
       <div class="hud">
@@ -232,7 +232,7 @@ const ctx = canvas.getContext("2d");
 
 let sim = createSim();
 let running = false, paused = false, lastTime = 0;
-let decided = 0, deferred = 0, unserved = 0;
+let decided = 0, deferred = 0;
 
 function syncConfig() {
   sim.config.speed = Number(document.getElementById("speed").value);
@@ -264,13 +264,27 @@ async function dispatch(passenger) {
 /**
  * Hand a demand to a bus, or leave it waiting. Returns false when the bus cannot take
  * it (every bus full in multi-pickup mode), in which case the passenger stays `waiting`
- * and is retried once a seat frees up. That is the real consequence of the capacity
- * rule, so it is counted and shown rather than hidden.
+ * and is retried once a seat frees up.
+ *
+ * This marks the passenger rather than counting the refusal. An earlier version
+ * incremented a counter here, which read as "N passengers have no seat" next to
+ * Waiting/Riding/Delivered, which are all current-state counts — but it was a
+ * cumulative tally that never fell, and retryWaiting() calls place() for every waiting
+ * passenger twice a second, so one passenger stuck for ten seconds added twenty.
  */
 function place(bus, passenger) {
-  if (assignToSim(sim, bus, passenger)) { updateChips(); return true; }
-  unserved++;
+  if (assignToSim(sim, bus, passenger)) {
+    passenger.noRoom = false;
+    updateChips();
+    return true;
+  }
+  passenger.noRoom = true;   // waiting because no bus had a seat for it
   return false;
+}
+
+/** How many demands are waiting right now purely because no bus had room. */
+function noRoomCount() {
+  return sim.passengers.filter(p => p.state === "waiting" && p.noRoom).length;
 }
 
 /** Try again for anything still waiting — a seat may have freed since it arrived. */
@@ -461,7 +475,7 @@ function updateHud() {
   document.getElementById("delivered").textContent = sim.deliveredCount;
   document.getElementById("demands").textContent = sim.demandCount;
   const backlog = document.getElementById("backlog");
-  if (backlog) backlog.textContent = unserved;
+  if (backlog) backlog.textContent = noRoomCount();
 }
 
 // ---- rendering ---------------------------------------------------------------
@@ -573,7 +587,7 @@ function startSim() {
     // the run restarts — including the restart it triggers.
     feasibility: sim.config.feasibility,
   }});
-  decided = 0; deferred = 0; unserved = 0; retryCooldown = 0; retryBusy = false;
+  decided = 0; deferred = 0; retryCooldown = 0; retryBusy = false;
   aboxCooldown = 0;
   running = true; paused = false;
   document.getElementById("pauseBtn").textContent = "Pause";
@@ -660,7 +674,7 @@ window.__fleetState = () => ({
   riding: sim.passengers.filter(p => p.state === "riding").length,
   delivered: sim.deliveredCount, demands: sim.demandCount,
   blocksDriven: Math.round(sim.blocksDriven), multiPickup: sim.config.multiPickup,
-  decided, deferred, unserved,
+  decided, deferred, noRoom: noRoomCount(),
 });
 </script>
 </body>

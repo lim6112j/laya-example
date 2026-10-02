@@ -85,10 +85,13 @@
 <header>
   <h1>CJet dispatches the bus fleet 🚌</h1>
   <p>50×50 grid, three autonomous buses. Every new passenger demand goes to CJet:
-     <code>assign: choice(bus_a/bus_b/bus_c)</code> — distance, load and queue all in prose.
-     The domain rules are injected into the question, not learned: a bus can carry
-     several demands at once, so the option criteria report how many blocks each bus
-     would <em>add</em> to the route it is already driving.
+     <code>assign: choice(bus_a/bus_b/bus_c)</code> — distance, load and seats all in prose.
+     The domain rules are injected into the question, not learned. Toggle
+     <strong>Multi-pickup physics</strong> to switch the world: on, a bus carries up to
+     four demands at once and the option criteria report how many blocks each bus would
+     <em>add</em> to the route it is already driving; off, a bus carries one and a nearby
+     pickup buys nothing. Same rules, same cost function, different world — the delivered
+     count shows which one the rule was written for.
      Dispatch off = greedy nearest-bus heuristic. <a href="/">← back to the main UI</a></p>
 </header>
 <main>
@@ -99,6 +102,7 @@
         <span>Riding <strong id="riding">0</strong></span>
         <span>Delivered <strong id="delivered">0</strong></span>
         <span>Demands <strong id="demands">0</strong></span>
+        <span>No seat <strong id="backlog">0</strong></span>
         <span class="badge" id="autoplayBadge">CJET IS DISPATCHING</span>
       </div>
       <div class="hud">
@@ -118,6 +122,9 @@
         <button id="pauseBtn">Pause</button>
         <span class="ctl"><input type="checkbox" id="autoplay" checked>
           <label for="autoplay">CJet dispatch <span style="color:var(--muted)">(off = greedy nearest-bus)</span></label></span>
+        <span class="ctl"><input type="checkbox" id="multiPickup" checked>
+          <label for="multiPickup">Multi-pickup physics
+            <span style="color:var(--muted)">(off = one passenger at a time)</span></label></span>
         <span class="ctl"><label>Model</label>
           <select id="model">
             <option value="auto">auto</option>
@@ -125,8 +132,8 @@
             <option value="typed-decisions">typed-decisions</option>
           </select></span>
         <span class="ctl"><label>New demand every</label>
-          <input type="range" id="demandEvery" min="3" max="10" step="1" value="5">
-          <label id="demandEveryLabel">5 s</label></span>
+          <input type="range" id="demandEvery" min="0.5" max="4" step="0.5" value="1.5">
+          <label id="demandEveryLabel">1.5 s</label></span>
         <span class="ctl"><label>Bus speed</label>
           <input type="range" id="speed" min="8" max="25" step="1" value="14">
           <label id="speedLabel">14 cells/s</label></span>
@@ -161,7 +168,7 @@ import {
   GRID, BUSES, ASSIGNMENTS,
   createSim, step as stepSim, newDemand, assignTo as assignToSim,
   buildState, buildQuestion,
-  rankedByDeadhead, greedyAssign, cellText, manhattan, busPos, RULES,
+  rankedByNearest, greedyAssign, cellText, manhattan, busPos, plannedPath, RULES,
 } from "/fleet_sim.js";
 
 const CELL = 10;                       // 50 x 50 cells at 10 px = 500 px canvas
@@ -172,14 +179,15 @@ const W = GRID * CELL, H = GRID * CELL;
 // the decided/deferred split is shown in the HUD rather than hidden — a gate tuned
 // until laya "always agrees" has removed laya from the loop.
 //
-// The floor is set from the measured distribution, not guessed. Over 200 fleet
+// The floor is set from the measured distribution, not guessed. Over 60 fleet
 // scenarios the rules arm's confidence is heavily compressed near zero
-// (p10 0.011, p50 0.057, p95 0.194), because the checkpoint ships
+// (p10 0.004, p50 0.041, p95 1.000), because the checkpoint ships
 // temperature_by_options["choice:3-5"] = 1.76, which softens the logits, and a
 // near-uniform 3-way distribution has low entropy confidence. An earlier guess of
 // 0.45 deferred 100% of decisions — the rules were in the prompt but laya never
-// got to use them. 0.013 defers roughly the bottom decile. Re-run
-// `node eval_rules.mjs` after changing the question to re-derive it.
+// got to use them. 0.013 sits near the 20th percentile and defers roughly a
+// fifth. Re-run `node eval_rules.mjs` after changing the question to re-derive
+// it: the distribution moves with the criteria text.
 const CONF_FLOOR = 0.013;
 
 const canvas = document.getElementById("sim");
@@ -187,31 +195,72 @@ const ctx = canvas.getContext("2d");
 
 let sim = createSim();
 let running = false, paused = false, lastTime = 0;
-let decided = 0, deferred = 0;
+let decided = 0, deferred = 0, unserved = 0;
 
 function syncConfig() {
   sim.config.speed = Number(document.getElementById("speed").value);
   sim.config.demandEvery = Number(document.getElementById("demandEvery").value);
+  sim.config.multiPickup = document.getElementById("multiPickup").checked;
 }
 
 // ---- dispatch ---------------------------------------------------------------
 
 async function dispatch(passenger) {
-  const useCJet = document.getElementById("autoplay").checked;
-  if (useCJet) {
-    const bus = await askCJet(passenger);
-    if (bus) { assignToSim(sim, bus, passenger); updateChips(); return; }
-    // CJet failed or deferred -> keep the fleet running with the heuristic
+  // dispatch() awaits the prediction, so without this guard a passenger still in
+  // `waiting` can be picked up a second time by retryWaiting() on the next tick —
+  // assigned twice, and its drop-off counted twice.
+  if (passenger.dispatching) return;
+  passenger.dispatching = true;
+  try {
+    const useCJet = document.getElementById("autoplay").checked;
+    if (useCJet) {
+      const bus = await askCJet(passenger);
+      if (bus && place(bus, passenger)) return;
+      // CJet failed or deferred -> keep the fleet running with the heuristic
+    }
+    place(greedyAssign(sim, passenger), passenger);
+  } finally {
+    passenger.dispatching = false;
   }
-  assignToSim(sim, greedyAssign(sim, passenger), passenger);
-  updateChips();
 }
 
-async function askCJet(passenger) {
+/**
+ * Hand a demand to a bus, or leave it waiting. Returns false when the bus cannot take
+ * it (every bus full in multi-pickup mode), in which case the passenger stays `waiting`
+ * and is retried once a seat frees up. That is the real consequence of the capacity
+ * rule, so it is counted and shown rather than hidden.
+ */
+function place(bus, passenger) {
+  if (assignToSim(sim, bus, passenger)) { updateChips(); return true; }
+  unserved++;
+  return false;
+}
+
+/** Try again for anything still waiting — a seat may have freed since it arrived. */
+async function retryWaiting() {
+  if (retryBusy) return;
+  retryBusy = true;
+  try {
+    const waiting = sim.passengers.filter(p => p.state === "waiting" && !p.dispatching);
+    for (const p of waiting) {
+      if (document.getElementById("autoplay").checked) {
+        const bus = await askCJet(p, true);
+        if (bus) { if (place(bus, p)) return; continue; }
+      }
+      place(greedyAssign(sim, p), p);
+    }
+  } finally {
+    retryBusy = false;
+  }
+}
+
+async function askCJet(passenger, quiet = false) {
   const state = buildState(sim, passenger);
   const question = buildQuestion(sim, passenger);
-  document.getElementById("whoAsked").textContent = `Demand #${passenger.id} asked:`;
-  document.getElementById("stateView").textContent = JSON.stringify(state, null, 2);
+  if (!quiet) {
+    document.getElementById("whoAsked").textContent = `Demand #${passenger.id} asked:`;
+    document.getElementById("stateView").textContent = JSON.stringify(state, null, 2);
+  }
   try {
     const response = await fetch("/api/predict", {
       method: "POST",
@@ -237,12 +286,13 @@ async function askCJet(passenger) {
     // percentile of this workload, so a floor on it would be dead code.
     const act = (answer.action || {}).act_probability ?? 1;
     const gated = answer.confidence < CONF_FLOOR;
-    const recommended = rankedByDeadhead(sim, passenger)[0];
-    renderDecision(passenger, bus, recommended, answer.probabilities || {},
-      answer.confidence, body.latency_ms, gated, act);
-    if (gated) { deferred++; updateGateCounter(); return null; }
-    decided++;
-    updateGateCounter();
+    if (!quiet) {
+      const recommended = rankedByNearest(sim, passenger)[0];
+      renderDecision(passenger, bus, recommended, answer.probabilities || {},
+        answer.confidence, body.latency_ms, gated, act);
+    }
+    if (gated) { if (!quiet) { deferred++; updateGateCounter(); } return null; }
+    if (!quiet) { decided++; updateGateCounter(); }
     return bus;
   } catch (err) {
     showError("Dispatch failed: " + err.message);
@@ -293,25 +343,41 @@ function showError(message) {
 
 // ---- tick --------------------------------------------------------------------
 
+let retryCooldown = 0;
+let retryBusy = false;
+
 function tick(dt) {
   if (!running || paused) return;
   syncConfig();
   // The sim is pure and returns the demands it spawned; dispatching them is the
   // DOM layer's job, which is what lets the harness replay the same scenarios.
   for (const passenger of stepSim(sim, dt)) dispatch(passenger);
+
+  // A demand that found every bus full waits for a seat. Retry on a cooldown rather
+  // than every frame, so a saturated fleet does not fire a prediction per tick.
+  retryCooldown -= dt;
+  if (retryCooldown <= 0 && sim.passengers.some(p => p.state === "waiting")) {
+    retryCooldown = 0.5;
+    retryWaiting();
+  }
   updateHud();
   updateChips();
 }
 
 function busChipText(bus) {
-  if (bus.job && bus.job.phase === "to_pickup") {
-    return `${bus.label} · to pickup (${Math.round(manhattan(busPos(bus), bus.job.passenger.pickup))} blocks)`;
+  const aboard = bus.onboard.size;
+  const next = bus.stops[0];
+  const seat = `${aboard}/${RULES.seats}`;
+  if (!next) {
+    return bus.queue.length
+      ? `${bus.label} · idle · ${bus.queue.length} queued`
+      : `${bus.label} · idle · empty`;
   }
-  if (bus.job && bus.job.phase === "to_dest") {
-    return `${bus.label} · carrying → ${cellText(bus.job.passenger.dest)} (${Math.round(manhattan(busPos(bus), bus.job.passenger.dest))} blocks)`;
-  }
-  if (bus.queue.length) return `${bus.label} · queue ${bus.queue.length}`;
-  return `${bus.label} · idle`;
+  const d = Math.round(manhattan(busPos(bus), next.point));
+  const what = next.kind === "pickup" ? "pickup" : "drop";
+  const more = bus.stops.length > 1 ? ` · +${bus.stops.length - 1} stops` : "";
+  const label = sim.config.multiPickup ? seat : "1/1";
+  return `${bus.label} · ${label} · ${what} ${cellText(next.point)} (${d})${more}`;
 }
 
 function updateChips() {
@@ -319,7 +385,7 @@ function updateChips() {
     const chip = document.getElementById(`chip-${bus.id}`);
     const text = busChipText(bus);
     chip.textContent = text;
-    chip.className = "chip" + (text.includes("idle") ? "" : " busy");
+    chip.className = "chip" + (bus.stops.length ? " busy" : "");
   }
 }
 
@@ -330,6 +396,8 @@ function updateHud() {
     sim.passengers.filter(p => p.state === "riding").length;
   document.getElementById("delivered").textContent = sim.deliveredCount;
   document.getElementById("demands").textContent = sim.demandCount;
+  const backlog = document.getElementById("backlog");
+  if (backlog) backlog.textContent = unserved;
 }
 
 // ---- rendering ---------------------------------------------------------------
@@ -372,7 +440,21 @@ function draw() {
     }
   }
 
-  // buses
+  // buses: remaining route first, so the plan is visible under the vehicle
+  for (const bus of sim.buses) {
+    const path = plannedPath(bus);
+    if (path.length) {
+      ctx.strokeStyle = bus.color + "66";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(bus.x * CELL + CELL / 2, bus.y * CELL + CELL / 2);
+      for (const pt of path) ctx.lineTo(pt.x * CELL + CELL / 2, pt.y * CELL + CELL / 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
   for (const bus of sim.buses) {
     const bx = bus.x * CELL + CELL / 2, by = bus.y * CELL + CELL / 2;
     ctx.fillStyle = bus.color;
@@ -384,6 +466,16 @@ function draw() {
     ctx.font = "9px sans-serif";
     ctx.textAlign = "center";
     ctx.fillText(bus.id, bx, by - 9);
+    // how many are aboard — the thing multi-pickup actually changes
+    if (bus.onboard.size) {
+      ctx.fillStyle = "#111827";
+      ctx.beginPath();
+      ctx.arc(bx + 7, by - 5, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = bus.color;
+      ctx.font = "7px sans-serif";
+      ctx.fillText(String(bus.onboard.size), bx + 7, by - 3);
+    }
   }
 
   if (!running) {
@@ -409,12 +501,12 @@ function frame(t) {
 // ---- wiring -------------------------------------------------------------------
 
 function startSim() {
-  syncConfig();
   sim = createSim({ seed: 1, config: {
     speed: Number(document.getElementById("speed").value),
     demandEvery: Number(document.getElementById("demandEvery").value),
+    multiPickup: document.getElementById("multiPickup").checked,
   }});
-  decided = 0; deferred = 0;
+  decided = 0; deferred = 0; unserved = 0; retryCooldown = 0; retryBusy = false;
   running = true; paused = false;
   document.getElementById("pauseBtn").textContent = "Pause";
   document.getElementById("history").innerHTML = "";
@@ -437,11 +529,17 @@ function updateAutoplayBadge() {
     "badge" + (document.getElementById("autoplay").checked && running ? " on" : "");
 }
 
-document.getElementById("rulesView").textContent =
-  `Rules in play (from RULES): multi-pickup ${RULES.multiPickup ? "on" : "off"} · ` +
-  `${RULES.freeSeats} seats per bus · a pickup within ${RULES.onRouteBlocks} blocks ` +
-  `of a bus's route counts as on-route. Each option's criteria report the blocks that ` +
-  `bus would add.`;
+function updateRulesView() {
+  const multi = document.getElementById("multiPickup").checked;
+  document.getElementById("rulesView").textContent = multi
+    ? `Rules in play: a bus carries up to ${RULES.seats} demands at once, and a pickup ` +
+      `within ${RULES.onRouteBlocks} blocks of its route is nearly free to add. Each ` +
+      `option's criteria report the blocks that bus would add, and buses with no free ` +
+      `seat are dropped from the question entirely.`
+    : `Rules in play: a bus carries ONE demand at a time, so a pickup near a busy bus ` +
+      `buys nothing until it is free. Each option's criteria report the blocks before ` +
+      `that bus could start.`;
+}
 
 document.getElementById("startBtn").addEventListener("click", startSim);
 document.getElementById("pauseBtn").addEventListener("click", function () {
@@ -449,6 +547,12 @@ document.getElementById("pauseBtn").addEventListener("click", function () {
   this.textContent = paused ? "Resume" : "Pause";
 });
 document.getElementById("autoplay").addEventListener("change", updateAutoplayBadge);
+document.getElementById("multiPickup").addEventListener("change", function () {
+  updateRulesView();
+  // Switching world mid-run would leave stops planned under the old rules in place —
+  // a serial bus walking a 6-stop route is still multi-pickup, silently. Restart.
+  if (running) startSim();
+});
 document.getElementById("demandEvery").addEventListener("input", function () {
   document.getElementById("demandEveryLabel").textContent = `${this.value} s`;
 });
@@ -456,16 +560,18 @@ document.getElementById("speed").addEventListener("input", function () {
   document.getElementById("speedLabel").textContent = `${this.value} cells/s`;
 });
 
+updateRulesView();
 requestAnimationFrame(frame);
 
 // debug/inspection hook
 window.__fleetState = () => ({
   buses: sim.buses.map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y),
-    job: b.job ? b.job.phase : null, queue: b.queue.length })),
+    aboard: b.onboard.size, stops: b.stops.length, queue: b.queue.length })),
   waiting: sim.passengers.filter(p => p.state === "waiting" || p.state === "assigned").length,
   riding: sim.passengers.filter(p => p.state === "riding").length,
   delivered: sim.deliveredCount, demands: sim.demandCount,
-  decided, deferred,
+  blocksDriven: Math.round(sim.blocksDriven), multiPickup: sim.config.multiPickup,
+  decided, deferred, unserved,
 });
 </script>
 </body>

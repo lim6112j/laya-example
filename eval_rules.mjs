@@ -6,19 +6,21 @@
 // Imports the same static/fleet_sim.js the browser does, so there is no second
 // implementation to drift out of sync.
 //
-// Scenarios are generated counterfactually: a sim is driven forward by the greedy
-// policy and every decision tick is snapshotted. Both arms then answer the *same*
-// snapshots, differing only in the question text. That isolates what we actually
-// want to measure — did injecting the rule change the model's choice — instead of
-// letting one arm's assignment steer the other arm's future inputs.
+// Scenarios are generated counterfactually: a sim is driven forward by a fixed policy
+// and every decision tick is snapshotted. Both arms then answer the *same* snapshots,
+// differing only in the question text. That isolates what we actually want to measure —
+// did injecting the rule change the model's choice — instead of letting one arm's
+// assignments steer the other arm's future inputs.
+//
+// The closed loop is reported separately, and per mode, because the counterfactual and
+// the end-to-end result answer different questions: the counterfactual asks whether the
+// rule reaches the model, the loop asks whether the world is one the rule helps.
 
 import {
-  createSim, step, newDemand, assignTo,
-  buildState, buildQuestion, buildBaselineQuestion,
-  costOf, insertionCost, rankedByDeadhead, manhattan, busPos, headEstimate,
+  createSim, step, assignTo, buildState, buildQuestion, buildBaselineQuestion,
+  detourCost, nearestCost, feasible, rankedByNearest, headEstimate,
 } from "./static/fleet_sim.js";
 
-// Accepts both `--n 200` and `--n=200`.
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
@@ -36,73 +38,99 @@ const SEED = Number(args.seed ?? 7);
 const ENDPOINT = args.url ?? "http://localhost:8000/api/predict";
 const MODEL = args.model ?? "auto";
 const WARMUP = Number(args.warmup ?? 5);
+const DEMAND_EVERY = Number(args.demand ?? 1.0);
 
 // ---- scenario generation -----------------------------------------------------
 
 /** Deep-copy the parts of a bus the cost model reads, so arms see identical inputs. */
 const snapBus = b => ({
   id: b.id, label: b.label, x: b.x, y: b.y,
-  job: b.job ? { phase: b.job.phase, passenger: b.job.passenger } : null,
+  stops: b.stops.map(s => ({ kind: s.kind, point: { ...s.point }, p: s.p })),
+  onboard: new Set(b.onboard),
   queue: [...b.queue],
 });
 
-function generateScenarios(count, seed) {
+function generateScenarios(count, seed, multiPickup) {
   const out = [];
   let s = seed;
   while (out.length < count) {
-    const sim = createSim({ seed: s++, config: { demandEvery: 0.6 } });
-    for (let i = 0; i < 3000 && out.length < count; i++) {
+    const sim = createSim({ seed: s++, config: { demandEvery: DEMAND_EVERY, multiPickup } });
+    for (let i = 0; i < 4000 && out.length < count; i++) {
       for (const p of step(sim, 0.05)) {
-        if (sim.demandCount < 3) continue;              // let the fleet get going
+        if (sim.demandCount < 3) { assignTo(sim, cheapest(sim, p), p); continue; }
         out.push({
           buses: sim.buses.map(snapBus),
           passenger: p,
-          backlog: sim.passengers.filter(q => q.state === "waiting").length,
+          config: { multiPickup },
           delivered: sim.deliveredCount,
         });
-        assignTo(sim, rankedByDeadhead(sim, p)[0], p);  // fixed policy drives the sim
+        assignTo(sim, cheapest(sim, p), p);
       }
     }
   }
   return out;
 }
 
+/** The policy that drives scenario generation: cheapest bus that can actually take it. */
+function cheapest(sim, p) {
+  const ok = sim.buses.filter(b => feasible(b, p, sim));
+  const pool = ok.length ? ok : sim.buses;
+  return [...pool].sort((a, b) => detourCost(a, p, sim) - detourCost(b, p, sim))[0];
+}
+
 // ---- arms --------------------------------------------------------------------
 
-/**
- * Rehydrate a snapshot into the shape buildState/buildQuestion expect, so the
- * text sent to the model is byte-identical to what the browser would send.
- */
-const simOf = sc => ({ buses: sc.buses, passengers: [], deliveredCount: sc.delivered });
+const simOf = sc => ({ buses: sc.buses, passengers: [], deliveredCount: sc.delivered || 0,
+                       config: { multiPickup: sc.config.multiPickup } });
 
+/**
+ * `rules`          — per-option derived numbers, infeasible buses omitted (Tier 0 + 1)
+ * `rules-nofilter` — same numbers, but every bus is offered (measures Tier 0 alone)
+ * `no-rules`       — the original static question
+ */
 const ARMS = {
   "no-rules": sc => ({
-    state: buildBaselineState(sc),
+    state: stripRules(buildState(simOf(sc), sc.passenger)),
     question: buildBaselineQuestion(),
   }),
   "rules": sc => ({
     state: buildState(simOf(sc), sc.passenger),
     question: buildQuestion(simOf(sc), sc.passenger),
   }),
+  "rules-nofilter": sc => {
+    const s = simOf(sc);
+    const q = buildQuestion(s, sc.passenger);
+    for (const bus of s.buses) {
+      const k = `bus_${bus.id.toLowerCase()}`;
+      if (!q.criteria[k]) q.criteria[k] = `${bus.label}: full, no room`;
+    }
+    return { state: buildState(s, sc.passenger), question: q };
+  },
 };
 
 /** The no-rules arm keeps the original state, which had no `rules` key. */
-function buildBaselineState(sc) {
-  const full = buildState(simOf(sc), sc.passenger);
-  const { rules, ...rest } = full;
+function stripRules(state) {
+  const { rules, ...rest } = state;
   return rest;
 }
 
 // ---- scoring -----------------------------------------------------------------
 
-/** The best achievable detour and deadhead for this scenario. */
+/** The best achievable detour and straight-line distance, over buses that can take it. */
 function bests(sc) {
-  let detour = Infinity, dead = Infinity;
+  let detour = Infinity, near = Infinity;
   for (const b of sc.buses) {
-    detour = Math.min(detour, insertionCost(b, sc.passenger.pickup));
-    dead = Math.min(dead, costOf(b, sc.passenger.pickup));
+    if (!feasible(b, sc.passenger, sc)) continue;
+    detour = Math.min(detour, detourCost(b, sc.passenger, sc));
+    near = Math.min(near, nearestCost(b, sc.passenger));
   }
-  return { detour, dead };
+  if (detour === Infinity) {                       // nothing can take it
+    for (const b of sc.buses) {
+      detour = Math.min(detour, detourCost(b, sc.passenger, sc));
+      near = Math.min(near, nearestCost(b, sc.passenger));
+    }
+  }
+  return { detour, near };
 }
 
 async function ask(arm, sc) {
@@ -119,19 +147,17 @@ async function ask(arm, sc) {
   if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
   const body = await res.json();
   const a = body.result.answers.assign;
-  return {
-    choice: a.choice,
-    confidence: a.confidence ?? 0,
-    act: (a.action || {}).act_probability ?? 1,
-    latency: body.latency_ms,
-    head: headEstimate(question),
-  };
+  return { choice: a.choice, confidence: a.confidence ?? 0,
+           act: (a.action || {}).act_probability ?? 1,
+           latency: body.latency_ms, head: headEstimate(question) };
 }
 
-// ---- run ---------------------------------------------------------------------
+// ---- counterfactual ----------------------------------------------------------
 
-const scenarios = generateScenarios(N, SEED);
-console.error(`generated ${scenarios.length} scenarios from seed ${SEED}`);
+const MODE = args.mode ?? "multi";
+const multi = MODE !== "serial";
+const scenarios = generateScenarios(N, SEED, multi);
+console.error(`generated ${scenarios.length} ${MODE}-mode scenarios from seed ${SEED}`);
 console.error(`warming up (${WARMUP} calls, the first one pays the checkpoint load)…`);
 for (let i = 0; i < WARMUP; i++) await ask("rules", scenarios[0]);
 
@@ -148,35 +174,43 @@ for (const arm of Object.keys(ARMS)) {
     }
     const bus = sc.buses.find(b => `bus_${b.id.toLowerCase()}` === r.choice);
     if (!bus) { console.error(`unknown choice ${r.choice}`); process.exit(1); }
-    const { detour, dead } = bests(sc);
+    const { detour, near } = bests(sc);
+    const got = detourCost(bus, sc.passenger, sc);
+    const gotNear = nearestCost(bus, sc.passenger);
     rows.push({
-      detourRegret: insertionCost(bus, sc.passenger.pickup) - detour,
-      deadRegret: costOf(bus, sc.passenger.pickup) - dead,
-      // did it pick the low-detour bus, and separately the nearest one?
-      pickedMinDetour: Math.abs(insertionCost(bus, sc.passenger.pickup) - detour) < 1e-6,
-      pickedNearest: Math.abs(costOf(bus, sc.passenger.pickup) - dead) < 1e-6,
+      detourRegret: got - detour,
+      nearRegret: gotNear - near,
+      pickedMinDetour: Math.abs(got - detour) < 1e-6,
+      pickedNearest: Math.abs(gotNear - near) < 1e-6,
+      violatedCapacity: !feasible(bus, sc.passenger, sc),
       confidence: r.confidence,
       act: r.act,
       latency: r.latency,
       head: r.head,
-      // is there actually a conflict to resolve? if the nearest bus is also the
-      // low-detour bus, the rule changes nothing and the scenario is uninformative
-      tensionful: Math.abs(detour - dead) > 0.5,
+      // is there a real conflict? if nearest == least-detour the rule changes nothing
+      tensionful: Math.abs(detour - near) > 0.5,
     });
   }
   results[arm] = rows;
   process.stderr.write(`${arm}: done\n`);
 }
 
-results["greedy"] = scenarios.map(sc => {
-  const { detour, dead } = bests(sc);
-  const b = rankedByDeadhead(simOf(sc), sc.passenger)[0];
+// The nearest-bus dispatcher, scored with no model at all. Note it does not check
+// feasibility — that is the point of the naive baseline, and it is why its
+// "nearest regret" can go negative: it is measured against an optimum restricted to
+// buses that can actually take the work.
+results.greedy = scenarios.map(sc => {
+  const s = simOf(sc);
+  const { detour, near } = bests(sc);
+  const b = rankedByNearest(s, sc.passenger)[0];
+  const got = detourCost(b, sc.passenger, s);
   return {
-    detourRegret: insertionCost(b, sc.passenger.pickup) - detour,
-    deadRegret: costOf(b, sc.passenger.pickup) - dead,
-    pickedMinDetour: Math.abs(insertionCost(b, sc.passenger.pickup) - detour) < 1e-6,
-    pickedNearest: true,
-    tensionful: Math.abs(detour - dead) > 0.5,
+    detourRegret: got - detour,
+    nearRegret: nearestCost(b, sc.passenger) - near,
+    pickedMinDetour: Math.abs(got - detour) < 1e-6,
+    pickedNearest: Math.abs(nearestCost(b, sc.passenger) - near) < 1e-6,
+    violatedCapacity: !feasible(b, sc.passenger, s),
+    tensionful: Math.abs(detour - near) > 0.5,
   };
 });
 
@@ -186,33 +220,27 @@ const mean = xs => xs.reduce((a, b) => a + b, 0) / (xs.length || 1);
 const pct = x => `${(100 * x).toFixed(1)}%`;
 const pick = (rows, k) => mean(rows.map(r => r[k]));
 
-const arms = ["no-rules", "rules", "greedy"];
+const arms = ["no-rules", "rules", "rules-nofilter", "greedy"];
 const tension = results["rules"].filter(r => r.tensionful);
 
-console.log(`\n${scenarios.length} scenarios (seed ${SEED}), ${tension.length} with a real ` +
-            `nearest-vs-least-detour conflict\n`);
-const cols = ["mean detour regret", "mean deadhead regret", "picks least-detour",
-              "picks nearest", "mean confidence", "act<0.5", "conf<0.45", "ms"];
+console.log(`\n${scenarios.length} scenarios (seed ${SEED}, ${MODE} mode), ` +
+            `${tension.length} with a real nearest-vs-least-detour conflict\n`);
 const w = 22;
 console.log("".padEnd(w) + arms.map(a => a.padStart(16)).join(""));
 console.log("-".repeat(w + 16 * arms.length));
-const rows = [
+for (const [label, fn] of [
   ["mean detour regret", a => pick(results[a], "detourRegret").toFixed(2) + " blk"],
-  ["mean deadhead regret", a => pick(results[a], "deadRegret").toFixed(2) + " blk"],
+  ["mean nearest regret", a => pick(results[a], "nearRegret").toFixed(2) + " blk"],
   ["picks least-detour", a => pct(mean(results[a].map(r => r.pickedMinDetour)))],
   ["picks nearest", a => pct(mean(results[a].map(r => r.pickedNearest)))],
+  ["capacity violations", a => String(results[a].filter(r => r.violatedCapacity).length)],
   ["mean confidence", a => mean(results[a].map(r => r.confidence ?? 0)).toFixed(3)],
-  ["act<0.5", a => results[a].some(r => r.act !== undefined) ? pct(mean(results[a].map(r => r.act < 0.5))) : "—"],
-  ["conf<0.45", a => results[a].some(r => r.confidence !== undefined) ? pct(mean(results[a].map(r => r.confidence < 0.45))) : "—"],
   ["ms", a => results[a].some(r => r.latency) ? mean(results[a].map(r => r.latency)).toFixed(0) : "—"],
   ["head tokens (est)", a => results[a].some(r => r.head) ? String(Math.max(...results[a].map(r => r.head))) : "—"],
-];
-for (const [label, fn] of rows) {
+]) {
   console.log(label.padEnd(w) + arms.map(a => String(fn(a)).padStart(16)).join(""));
 }
 
-// The same table restricted to the scenarios where the rule actually changes the
-// answer — that is the subset the rules were written for.
 if (tension.length) {
   console.log(`\nRestricted to the ${tension.length} conflicting scenarios:\n`);
   console.log("".padEnd(w) + arms.map(a => a.padStart(16)).join(""));
@@ -220,84 +248,84 @@ if (tension.length) {
   for (const [label, fn] of [
     ["mean detour regret", a => pick(results[a].filter(r => r.tensionful), "detourRegret").toFixed(2) + " blk"],
     ["picks least-detour", a => pct(mean(results[a].filter(r => r.tensionful).map(r => r.pickedMinDetour)))],
-    ["mean deadhead regret", a => pick(results[a].filter(r => r.tensionful), "deadRegret").toFixed(2) + " blk"],
   ]) {
     console.log(label.padEnd(w) + arms.map(a => String(fn(a)).padStart(16)).join(""));
   }
 }
 
-// Confidence / act distributions, so the floors in fleet.html are set from data
-// rather than guessed. Both are compressed near zero: temperature_by_options
-// ships choice:3-5 at 1.76, which softens the logits, and a near-uniform 3-way
-// distribution has low entropy confidence.
 function percentiles(rows, key) {
-  const xs = rows.map(r => r[key]).sort((a, b) => a - b);
+  const xs = rows.map(r => r[key]).filter(x => x !== undefined).sort((a, b) => a - b);
+  if (!xs.length) return "—";
   const q = p => xs[Math.floor(p * (xs.length - 1))];
-  return [0.05, 0.10, 0.25, 0.50, 0.95].map(p => `${(p * 100).toFixed(0)}% ${q(p).toFixed(3)}`).join("  ");
+  return [0.10, 0.50, 0.95].map(p => `p${(p * 100).toFixed(0)} ${q(p).toFixed(3)}`).join("  ");
 }
 console.log(`\nconfidence (rules arm): ${percentiles(results["rules"], "confidence")}`);
 console.log(`act_probability      : ${percentiles(results["rules"], "act")}`);
-console.log(`A floor set near the 10th percentile defers roughly the bottom 10%.`);
 
 // ---- closed loop -------------------------------------------------------------
 
-// The counterfactual comparison above isolates the decision. This one closes the
-// loop: each policy drives its own sim to completion, so it also pays for the
-// assignments it makes downstream.
-//
-// Caveat worth reading before trusting it: the simulator is still SERIAL — a bus
-// serves its queue one job at a time — while insertionCost prices a bus as if it
-// could multi-pickup. Until the simulator grows a manifest (phase 5), optimising
-// for detour optimises for a capability the sim does not have, and this number can
-// legitimately come out worse. That gap is the point of measuring it.
-async function closedLoop(policy, seed, seconds = 120) {
-  const sim = createSim({ seed, config: { demandEvery: 0.6 } });
+// The counterfactual isolates the decision. This closes the loop: each policy drives
+// its own sim, in each world, so it pays for the assignments it makes downstream.
+// This is the number that decides whether the rule is worth anything.
+async function closedLoop(policy, seed, mPickup, seconds = 200) {
+  const sim = createSim({ seed, config: { demandEvery: DEMAND_EVERY, multiPickup: mPickup } });
   const ticks = Math.round(seconds / 0.05);
   let calls = 0;
+  const pickBus = async (p) => {
+    if (policy === "greedy") return rankedByNearest(sim, p)[0];
+    const { state, question } = ARMS[policy]({ buses: sim.buses, passenger: p, config: sim.config });
+    const res = await fetch(ENDPOINT, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state, questions: { assign: question },
+        ...(MODEL !== "auto" ? { model: MODEL } : {}) }),
+    });
+    calls++;
+    if (!res.ok) return cheapest(sim, p);
+    const ch = (await res.json()).result.answers.assign.choice;
+    return sim.buses.find(b => `bus_${b.id.toLowerCase()}` === ch) || cheapest(sim, p);
+  };
   for (let i = 0; i < ticks; i++) {
     for (const p of step(sim, 0.05)) {
-      if (sim.demandCount < 3) { assignTo(sim, rankedByDeadhead(sim, p)[0], p); continue; }
-      let bus;
-      if (policy === "greedy") {
-        bus = rankedByDeadhead(sim, p)[0];
-      } else {
-        const { state, question } = ARMS[policy]({ ...sim, passenger: p });
-        const res = await fetch(ENDPOINT, {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ state, questions: { assign: question },
-            ...(MODEL !== "auto" ? { model: MODEL } : {}) }),
-        });
-        if (!res.ok) { bus = rankedByDeadhead(sim, p)[0]; }
-        else {
-          const ch = (await res.json()).result.answers.assign.choice;
-          bus = sim.buses.find(b => `bus_${b.id.toLowerCase()}` === ch) || rankedByDeadhead(sim, p)[0];
-        }
-        calls++;
-      }
-      assignTo(sim, bus, p);
+      if (sim.demandCount < 3) { assignTo(sim, cheapest(sim, p), p); continue; }
+      assignTo(sim, await pickBus(p), p);
+    }
+    for (const p of sim.passengers) {
+      if (p.state === "waiting") assignTo(sim, await pickBus(p), p);
     }
   }
-  const riding = sim.passengers.filter(p => p.state === "riding").length;
-  return { delivered: sim.deliveredCount, demands: sim.demandCount, riding, calls };
+  return { delivered: sim.deliveredCount, demands: sim.demandCount, calls,
+           blocks: sim.blocksDriven };
 }
 
 if (args.closed !== false) {
-  console.log(`\nClosed loop, ${args.loopsecs ?? 120}s per policy:\n`);
-  const w2 = 22;
-  console.log("".padEnd(w2) + ["no-rules", "rules", "greedy"].map(a => a.padStart(14)).join(""));
-  console.log("-".repeat(w2 + 14 * 3));
-  const runs = {};
-  for (const p of ["no-rules", "rules", "greedy"]) {
-    const rows = [];
-    for (const sd of [11, 12, 13]) rows.push(await closedLoop(p, sd));
-    runs[p] = rows;
+  const policies = ["rules", "greedy"];
+  console.log(`\nClosed loop, ${args.loopsecs ?? 200}s per policy, one demand every ` +
+              `${DEMAND_EVERY}s, 3 seeds each.\nCells are "delivered / blocks per demand":\n`);
+  const w2 = 20;
+  console.log("".padEnd(w2) + policies.map(p => p.padStart(22)).join(""));
+  console.log("-".repeat(w2 + 22 * policies.length));
+  for (const [label, m] of [["multi-pickup on", true], ["multi-pickup off", false]]) {
+    const out = [];
+    for (const p of policies) {
+      const rows = [];
+      for (const sd of [11, 12, 13]) rows.push(await closedLoop(p, sd, m));
+      out.push(`${mean(rows.map(r => r.delivered)).toFixed(1)} / ` +
+               `${mean(rows.map(r => r.blocks / r.demands)).toFixed(1)}`);
+    }
+    console.log(label.padEnd(w2) + out.map(s => s.padStart(22)).join(""));
   }
-  const line = (label, fn) =>
-    console.log(label.padEnd(w2) + ["no-rules", "rules", "greedy"].map(p => String(fn(runs[p])).padStart(14)).join(""));
-  line("delivered", r => mean(r.map(x => x.delivered)).toFixed(1));
-  line("demands", r => mean(r.map(x => x.demands)).toFixed(1));
-  line("still riding", r => mean(r.map(x => x.riding)).toFixed(1));
-  line("calls", r => mean(r.map(x => x.calls)).toFixed(0));
-  console.log(`\nSerial simulator: the detour objective is only correct once buses can actually`);
-  console.log(`multi-pickup (phase 5). Treat "delivered" here as a canary, not a verdict.`);
+  const cell = async (p, m) => {
+    const runs = await Promise.all([11, 12, 13].map(sd => closedLoop(p, sd, m)));
+    return mean(runs.map(r => r.delivered));
+  };
+  const [rMulti, rSerial, gMulti, gSerial] = await Promise.all([
+    cell("rules", true), cell("rules", false), cell("greedy", true), cell("greedy", false)]);
+  const delta = (a, b) => {
+    const pctChange = (a / b - 1) * 100;
+    return `${pctChange >= 0 ? "+" : ""}${pctChange.toFixed(0)}%`;
+  };
+  console.log(`\nmulti-pickup is worth ${delta(rMulti, rSerial)} throughput to the rules ` +
+              `dispatcher and ${delta(gMulti, gSerial)} to greedy.`);
+  console.log(`The detour rule is worth ${delta(rMulti, gMulti)} over nearest-bus with ` +
+              `multi-pickup, and ${delta(rSerial, gSerial)} without it.`);
 }

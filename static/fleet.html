@@ -62,6 +62,8 @@
   .bar.winner .bar-label { color: var(--text); font-weight: 600; }
   .bar.winner .bar-fill { background: var(--ok); }
   .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  #rulesView { background: var(--accent-soft); color: var(--accent); padding: 8px 10px;
+    border-radius: 6px; margin-bottom: 10px; }
   #whoAsked { font-weight: 600; color: var(--accent); margin-bottom: 6px; display: block; }
   #stateView { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 12px; background: #f3f4f6; border: 1px solid var(--border);
@@ -84,6 +86,9 @@
   <h1>CJet dispatches the bus fleet 🚌</h1>
   <p>50×50 grid, three autonomous buses. Every new passenger demand goes to CJet:
      <code>assign: choice(bus_a/bus_b/bus_c)</code> — distance, load and queue all in prose.
+     The domain rules are injected into the question, not learned: a bus can carry
+     several demands at once, so the option criteria report how many blocks each bus
+     would <em>add</em> to the route it is already driving.
      Dispatch off = greedy nearest-bus heuristic. <a href="/">← back to the main UI</a></p>
 </header>
 <main>
@@ -95,6 +100,9 @@
         <span>Delivered <strong id="delivered">0</strong></span>
         <span>Demands <strong id="demands">0</strong></span>
         <span class="badge" id="autoplayBadge">CJET IS DISPATCHING</span>
+      </div>
+      <div class="hud">
+        <span id="gateCount">0 decided · 0 deferred</span>
       </div>
       <canvas id="sim" width="500" height="500"></canvas>
       <div class="chips">
@@ -130,6 +138,7 @@
     <div id="banner" class="banner"></div>
     <div class="panel">
       <h2>CJet's view — the dispatch state it receives</h2>
+      <div class="meta" id="rulesView"></div>
       <span id="whoAsked"></span>
       <div id="stateView">not started yet</div>
     </div>
@@ -142,168 +151,65 @@
   </section>
 </main>
 
-<script>
+<script type="module">
 "use strict";
 
-// ---- fixed map geometry -----------------------------------------------------
+// The simulation, the domain rules, and the question text all live in fleet_sim.js,
+// which is also what eval_rules.mjs imports — so the browser and the A/B harness
+// cannot drift apart. This file is only the DOM layer: canvas, chips, history, fetch.
+import {
+  GRID, BUSES, ASSIGNMENTS,
+  createSim, step as stepSim, newDemand, assignTo as assignToSim,
+  buildState, buildQuestion,
+  rankedByDeadhead, greedyAssign, cellText, manhattan, busPos, RULES,
+} from "/fleet_sim.js";
 
-const GRID = 50;
 const CELL = 10;                       // 50 x 50 cells at 10 px = 500 px canvas
 const W = GRID * CELL, H = GRID * CELL;
-const DEMAND_PACE_MS = 600;            // passengers appear staggered inside the map
 
-const BUSES = {
-  A: { label: "Bus A", color: "#f87171", css: "bus-a", start: { x: 10, y: 40 } },
-  B: { label: "Bus B", color: "#4ade80", css: "bus-b", start: { x: 40, y: 10 } },
-  C: { label: "Bus C", color: "#60a5fa", css: "bus-c", start: { x: 25, y: 25 } },
-};
-
-const manhattan = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
-const cellText = c => `grid (${c.x}, ${c.y})`;
-// buses carry x/y as numbers; wrap them as a point for distance helpers
-const busPos = bus => ({ x: bus.x, y: bus.y });
-
-function randomCell() {
-  return { x: 1 + Math.floor(Math.random() * (GRID - 2)),
-           y: 1 + Math.floor(Math.random() * (GRID - 2)) };
-}
-
-// ---- simulation state -------------------------------------------------------
+// Confidence gate. laya proposes, the cost model disposes: below the floor we take
+// the deterministic answer instead. This caps how often laya actually decides, so
+// the decided/deferred split is shown in the HUD rather than hidden — a gate tuned
+// until laya "always agrees" has removed laya from the loop.
+//
+// The floor is set from the measured distribution, not guessed. Over 200 fleet
+// scenarios the rules arm's confidence is heavily compressed near zero
+// (p10 0.011, p50 0.057, p95 0.194), because the checkpoint ships
+// temperature_by_options["choice:3-5"] = 1.76, which softens the logits, and a
+// near-uniform 3-way distribution has low entropy confidence. An earlier guess of
+// 0.45 deferred 100% of decisions — the rules were in the prompt but laya never
+// got to use them. 0.013 defers roughly the bottom decile. Re-run
+// `node eval_rules.mjs` after changing the question to re-derive it.
+const CONF_FLOOR = 0.013;
 
 const canvas = document.getElementById("sim");
 const ctx = canvas.getContext("2d");
 
-let buses = [], passengers = [], demandCount = 0, deliveredCount = 0;
-let running = false, paused = false, lastTime = 0, demandTimer = null;
+let sim = createSim();
+let running = false, paused = false, lastTime = 0;
+let decided = 0, deferred = 0;
 
-function speed() { return Number(document.getElementById("speed").value); }
-
-function makeBus(id) {
-  const spec = BUSES[id];
-  return {
-    id, label: spec.label, color: spec.color, css: spec.css,
-    x: spec.start.x, y: spec.start.y,
-    job: null,            // {phase: "to_pickup"|"to_dest", passenger}
-    queue: [],            // passengers waiting for this bus to become free
-    asking: false,
-  };
-}
-
-function newDemand() {
-  demandCount++;
-  const pickup = randomCell();
-  let dest = randomCell();
-  while (manhattan(pickup, dest) < 8) dest = randomCell();
-  const passenger = { id: demandCount, pickup, dest, state: "waiting", bus: null };
-  passengers.push(passenger);
-  dispatch(passenger);
+function syncConfig() {
+  sim.config.speed = Number(document.getElementById("speed").value);
+  sim.config.demandEvery = Number(document.getElementById("demandEvery").value);
 }
 
 // ---- dispatch ---------------------------------------------------------------
-
-const QUESTION = {
-  type: "choice",
-  instructions: "You are the dispatcher of an autonomous bus fleet. A new passenger demand just arrived. Which bus should serve it?",
-  criteria: {
-    bus_a: "assign to Bus A (red)",
-    bus_b: "assign to Bus B (green)",
-    bus_c: "assign to Bus C (blue)",
-  },
-};
-
-function describeBus(bus, pickup) {
-  return busText(bus, pickup);
-}
-
-function busText(bus, pickup) {
-  const at = `at ${cellText({ x: Math.round(bus.x), y: Math.round(bus.y) })}`;
-  if (bus.job === null && bus.queue.length === 0) {
-    return `${bus.label} (idle, empty) is ${at}, ${Math.round(manhattan(busPos(bus), pickup))} blocks from the pickup, no jobs queued.`;
-  }
-  if (bus.job && bus.job.phase === "to_dest") {
-    const p = bus.job.passenger;
-    const remain = Math.round(manhattan(busPos(bus), p.dest));
-    const afterDrop = remain + Math.round(manhattan(p.dest, pickup));
-    return `${bus.label} (carrying a passenger) will drop off at ${cellText(p.dest)} in ${remain} blocks, ` +
-      `then is ${afterDrop} blocks from the new pickup, ${bus.queue.length} jobs already queued.`;
-  }
-  if (bus.job && bus.job.phase === "to_pickup") {
-    const p = bus.job.passenger;
-    const remain = Math.round(manhattan(busPos(bus), p.pickup));
-    const afterTrip = remain + Math.round(manhattan(p.pickup, p.dest)) + Math.round(manhattan(p.dest, pickup));
-    return `${bus.label} (empty, driving to a pickup at ${cellText(p.pickup)}) is ${remain} blocks from it, ` +
-      `then ${afterTrip} blocks from the new pickup, ${bus.queue.length} jobs already queued.`;
-  }
-  const first = bus.queue[0];
-  const remain = Math.round(manhattan(busPos(bus), first.pickup));
-  return `${bus.label} (empty, ${bus.queue.length} jobs queued) will reach its first pickup at ${cellText(first.pickup)} in ${remain} blocks, ` +
-    `then is ${remain + Math.round(manhattan(first.pickup, first.dest)) + Math.round(manhattan(first.dest, pickup))} blocks from the new pickup.`;
-}
-
-function buildState(passenger) {
-  const ranked = rankedBuses(passenger);
-  const [best, second] = ranked;
-  return {
-    demand: `A new passenger request arrived at ${cellText(passenger.pickup)} and wants to go to ` +
-      `${cellText(passenger.dest)}, a ${manhattan(passenger.pickup, passenger.dest)}-block ride.`,
-    fleet: ranked.map(bus => busText(bus, passenger.pickup)).join(" "),
-    recommendation: `${best.label} looks best placed for this demand: ` +
-      `${Math.round(costOf(best, passenger.pickup))} blocks away (estimated, via its current job and queue); ` +
-      `${second.label} would need ${Math.round(costOf(second, passenger.pickup))} blocks. ` +
-      `You may follow the recommendation or override it if the situation warrants.`,
-    backlog: `${passengers.filter(p => p.state === "waiting").length} passengers waiting, ` +
-      `${deliveredCount} delivered so far`,
-  };
-}
-
-// greedy baseline: nearest bus by estimated total path, ignoring queue length
-// estimated total blocks for this bus to reach the new pickup
-function costOf(bus, pickup) {
-  if (bus.job && bus.job.phase === "to_dest") {
-    const p = bus.job.passenger;
-    return manhattan(busPos(bus), p.dest) + manhattan(p.dest, pickup);
-  }
-  if (bus.job && bus.job.phase === "to_pickup") {
-    const p = bus.job.passenger;
-    return manhattan(busPos(bus), p.pickup) + manhattan(p.pickup, p.dest) +
-      manhattan(p.dest, pickup);
-  }
-  if (bus.queue.length) {
-    const first = bus.queue[0];
-    return manhattan(busPos(bus), first.pickup) + manhattan(first.pickup, first.dest) +
-      manhattan(first.dest, pickup);
-  }
-  return manhattan(busPos(bus), pickup);
-}
-
-function rankedBuses(passenger) {
-  return [...buses].sort((a, b) => costOf(a, passenger.pickup) - costOf(b, passenger.pickup));
-}
-
-function greedyAssign(passenger) {
-  return rankedBuses(passenger)[0];
-}
 
 async function dispatch(passenger) {
   const useCJet = document.getElementById("autoplay").checked;
   if (useCJet) {
     const bus = await askCJet(passenger);
-    if (bus) { assignTo(bus, passenger); return; }
-    // CJet failed (error path) -> keep the fleet running with the heuristic
+    if (bus) { assignToSim(sim, bus, passenger); updateChips(); return; }
+    // CJet failed or deferred -> keep the fleet running with the heuristic
   }
-  assignTo(greedyAssign(passenger), passenger);
-}
-
-function assignTo(bus, passenger) {
-  if (!bus) return;
-  passenger.bus = bus.id;
-  passenger.state = "assigned";
-  bus.queue.push(passenger);
+  assignToSim(sim, greedyAssign(sim, passenger), passenger);
   updateChips();
 }
 
 async function askCJet(passenger) {
-  const state = buildState(passenger);
+  const state = buildState(sim, passenger);
+  const question = buildQuestion(sim, passenger);
   document.getElementById("whoAsked").textContent = `Demand #${passenger.id} asked:`;
   document.getElementById("stateView").textContent = JSON.stringify(state, null, 2);
   try {
@@ -312,7 +218,7 @@ async function askCJet(passenger) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         state,
-        questions: { assign: QUESTION },
+        questions: { assign: question },
         model: document.getElementById("model").value,
       }),
     });
@@ -324,11 +230,19 @@ async function askCJet(passenger) {
     }
     const answer = body.result.answers.assign;
     const choice = answer.choice;                      // "bus_a" | "bus_b" | "bus_c"
-    const bus = buses.find(b => choice === `bus_${b.id.toLowerCase()}`);
+    const bus = sim.buses.find(b => choice === `bus_${b.id.toLowerCase()}`);
     if (!bus) return null;
-    const recommended = rankedBuses(passenger)[0];
+
+    // act_probability is reported but not gated on: measured at 1.000 across every
+    // percentile of this workload, so a floor on it would be dead code.
+    const act = (answer.action || {}).act_probability ?? 1;
+    const gated = answer.confidence < CONF_FLOOR;
+    const recommended = rankedByDeadhead(sim, passenger)[0];
     renderDecision(passenger, bus, recommended, answer.probabilities || {},
-      answer.confidence, body.latency_ms);
+      answer.confidence, body.latency_ms, gated, act);
+    if (gated) { deferred++; updateGateCounter(); return null; }
+    decided++;
+    updateGateCounter();
     return bus;
   } catch (err) {
     showError("Dispatch failed: " + err.message);
@@ -336,9 +250,13 @@ async function askCJet(passenger) {
   }
 }
 
-const ASSIGNMENTS = ["bus_a", "bus_b", "bus_c"];
+function updateGateCounter() {
+  const el = document.getElementById("gateCount");
+  if (!el) return;
+  el.textContent = `${decided} decided · ${deferred} deferred`;
+}
 
-function renderDecision(passenger, bus, recommended, probs, confidence, latency) {
+function renderDecision(passenger, bus, recommended, probs, confidence, latency, gated, act) {
   const bars = document.getElementById("decisionBars");
   bars.innerHTML = "";
   for (const label of ASSIGNMENTS) {
@@ -352,15 +270,17 @@ function renderDecision(passenger, bus, recommended, probs, confidence, latency)
       `<div class="bar-label">${pct}%${label === `bus_${bus.id.toLowerCase()}` ? " ← CJet" : ""}</div>`;
     bars.appendChild(row);
   }
+  const gateNote = gated ? " · below gate → deferred to the cost model" : "";
   document.getElementById("decisionMeta").textContent =
-    `demand #${passenger.id} · confidence ${confidence} · latency ${latency} ms`;
+    `demand #${passenger.id} · confidence ${confidence} · act ${act} · latency ${latency} ms${gateNote}`;
 
   const history = document.getElementById("history");
   const entry = document.createElement("div");
   const override = bus.id !== recommended.id ? " · <em>override</em>" : "";
+  const tag = gated ? " · <em>deferred</em>" : "";
   entry.innerHTML = `<span class="${bus.css}">demand #${passenger.id} → ${bus.label}</span>` +
     ` (${((probs[`bus_${bus.id.toLowerCase()}`] || 0) * 100).toFixed(0)}%) · ` +
-    `pickup ${cellText(passenger.pickup)}${override} · ${new Date().toLocaleTimeString()}`;
+    `pickup ${cellText(passenger.pickup)}${override}${tag} · ${new Date().toLocaleTimeString()}`;
   history.prepend(entry);
   while (history.children.length > 12) history.lastChild.remove();
 }
@@ -371,48 +291,14 @@ function showError(message) {
   banner.className = message ? "banner error" : "banner";
 }
 
-// ---- physics -----------------------------------------------------------------
+// ---- tick --------------------------------------------------------------------
 
-function step(dt) {
+function tick(dt) {
   if (!running || paused) return;
-
-  // demand spawner
-  if (demandTimer === null) demandTimer = 0;
-  demandTimer += dt * 1000;
-  const pace = Number(document.getElementById("demandEvery").value) * 1000;
-  if (demandTimer >= pace) {
-    demandTimer = 0;
-    newDemand();
-  }
-
-  for (const bus of buses) {
-    // take the next queued job when free
-    if (!bus.job && bus.queue.length) {
-      bus.job = { phase: "to_pickup", passenger: bus.queue.shift() };
-    }
-    const target = bus.job
-      ? (bus.job.phase === "to_pickup" ? bus.job.passenger.pickup : bus.job.passenger.dest)
-      : null;
-    if (target) {
-      // axis-by-axis Manhattan stepping
-      if (bus.x !== target.x) {
-        bus.x += Math.sign(target.x - bus.x) * Math.min(speed() * dt, Math.abs(target.x - bus.x));
-      } else if (bus.y !== target.y) {
-        bus.y += Math.sign(target.y - bus.y) * Math.min(speed() * dt, Math.abs(target.y - bus.y));
-      }
-      if (bus.x === target.x && bus.y === target.y) {
-        if (bus.job.phase === "to_pickup") {
-          bus.job.phase = "to_dest";
-          bus.job.passenger.state = "riding";
-        } else {
-          bus.job.passenger.state = "delivered";
-          deliveredCount++;
-          bus.job = null;
-        }
-      }
-    }
-  }
-
+  syncConfig();
+  // The sim is pure and returns the demands it spawned; dispatching them is the
+  // DOM layer's job, which is what lets the harness replay the same scenarios.
+  for (const passenger of stepSim(sim, dt)) dispatch(passenger);
   updateHud();
   updateChips();
 }
@@ -429,7 +315,7 @@ function busChipText(bus) {
 }
 
 function updateChips() {
-  for (const bus of buses) {
+  for (const bus of sim.buses) {
     const chip = document.getElementById(`chip-${bus.id}`);
     const text = busChipText(bus);
     chip.textContent = text;
@@ -439,11 +325,11 @@ function updateChips() {
 
 function updateHud() {
   document.getElementById("waiting").textContent =
-    passengers.filter(p => p.state === "waiting" || p.state === "assigned").length;
+    sim.passengers.filter(p => p.state === "waiting" || p.state === "assigned").length;
   document.getElementById("riding").textContent =
-    passengers.filter(p => p.state === "riding").length;
-  document.getElementById("delivered").textContent = deliveredCount;
-  document.getElementById("demands").textContent = demandCount;
+    sim.passengers.filter(p => p.state === "riding").length;
+  document.getElementById("delivered").textContent = sim.deliveredCount;
+  document.getElementById("demands").textContent = sim.demandCount;
 }
 
 // ---- rendering ---------------------------------------------------------------
@@ -462,7 +348,7 @@ function draw() {
   ctx.stroke();
 
   // passengers: waiting (dot + destination ring), assigned (ring + bus color)
-  for (const p of passengers) {
+  for (const p of sim.passengers) {
     if (p.state === "delivered") continue;
     const px = p.pickup.x * CELL + CELL / 2, py = p.pickup.y * CELL + CELL / 2;
     // destination marker
@@ -487,7 +373,7 @@ function draw() {
   }
 
   // buses
-  for (const bus of buses) {
+  for (const bus of sim.buses) {
     const bx = bus.x * CELL + CELL / 2, by = bus.y * CELL + CELL / 2;
     ctx.fillStyle = bus.color;
     ctx.fillRect(bx - 6, by - 5, 12, 10);
@@ -515,7 +401,7 @@ function draw() {
 function frame(t) {
   const dt = Math.min((t - lastTime) / 1000, 0.05);
   lastTime = t;
-  step(dt);
+  tick(dt);
   draw();
   requestAnimationFrame(frame);
 }
@@ -523,10 +409,12 @@ function frame(t) {
 // ---- wiring -------------------------------------------------------------------
 
 function startSim() {
-  buses = [makeBus("A"), makeBus("B"), makeBus("C")];
-  passengers = [];
-  demandCount = 0; deliveredCount = 0;
-  demandTimer = null;
+  syncConfig();
+  sim = createSim({ seed: 1, config: {
+    speed: Number(document.getElementById("speed").value),
+    demandEvery: Number(document.getElementById("demandEvery").value),
+  }});
+  decided = 0; deferred = 0;
   running = true; paused = false;
   document.getElementById("pauseBtn").textContent = "Pause";
   document.getElementById("history").innerHTML = "";
@@ -536,17 +424,24 @@ function startSim() {
   document.getElementById("stateView").textContent = "waiting for the first demand…";
   showError("");
   updateAutoplayBadge();
+  updateGateCounter();
   updateHud();
   updateChips();
   // two initial demands so the fleet starts working immediately
-  newDemand();
-  newDemand();
+  dispatch(newDemand(sim));
+  dispatch(newDemand(sim));
 }
 
 function updateAutoplayBadge() {
   document.getElementById("autoplayBadge").className =
     "badge" + (document.getElementById("autoplay").checked && running ? " on" : "");
 }
+
+document.getElementById("rulesView").textContent =
+  `Rules in play (from RULES): multi-pickup ${RULES.multiPickup ? "on" : "off"} · ` +
+  `${RULES.freeSeats} seats per bus · a pickup within ${RULES.onRouteBlocks} blocks ` +
+  `of a bus's route counts as on-route. Each option's criteria report the blocks that ` +
+  `bus would add.`;
 
 document.getElementById("startBtn").addEventListener("click", startSim);
 document.getElementById("pauseBtn").addEventListener("click", function () {
@@ -565,11 +460,12 @@ requestAnimationFrame(frame);
 
 // debug/inspection hook
 window.__fleetState = () => ({
-  buses: buses.map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y),
+  buses: sim.buses.map(b => ({ id: b.id, x: Math.round(b.x), y: Math.round(b.y),
     job: b.job ? b.job.phase : null, queue: b.queue.length })),
-  waiting: passengers.filter(p => p.state === "waiting" || p.state === "assigned").length,
-  riding: passengers.filter(p => p.state === "riding").length,
-  delivered: deliveredCount, demands: demandCount,
+  waiting: sim.passengers.filter(p => p.state === "waiting" || p.state === "assigned").length,
+  riding: sim.passengers.filter(p => p.state === "riding").length,
+  delivered: sim.deliveredCount, demands: sim.demandCount,
+  decided, deferred,
 });
 </script>
 </body>

@@ -43,6 +43,8 @@ metadata (model, repo, reason, latency).
   (offline hub + fast-build monkeypatch + preload; see below)
 - `test_server.py` — stubbed-API tests, no model load:
   `uv run pytest test_server.py`
+- `test_fleet_sim.mjs` — simulation invariants, no model load:
+  `node --test test_fleet_sim.mjs`
 
 ### laya plays Breakout
 
@@ -78,18 +80,123 @@ deadlock laya prevents.
 `static/fleet.html` (linked from the UI header) simulates an autonomous bus
 fleet on a 50×50 grid: passengers appear with a pickup and a destination, and
 every new demand is dispatched by laya —
-`assign: choice(bus_a/bus_b/bus_c)`. The prose state spells out the demand,
-each bus's position/job phase/queue, and a ranked recommendation (closest bus
-by estimated blocks first); laya arbitrates — it usually confirms the
-recommendation and sometimes overrides it (flagged in the history), since
-pure numeric ranking of three peers is outside the checkpoints' System-1
-training. Buses drive Manhattan-style to the pickup, carry the passenger to
-the destination and loop for queued jobs. The screen shows the grid with
-buses, waiting passengers and destination markers, per-bus status chips,
-"Laya's view" (the dispatch state sent) and "Laya's decisions" (assignment
-bars, confidence, latency, history). Toggle laya dispatch off to compare
-against a greedy nearest-bus heuristic; sliders tune demand frequency and bus
-speed.
+`assign: choice(bus_a/bus_b/bus_c)`. Buses drive Manhattan-style to the
+pickup, carry the passenger to the destination and loop for queued jobs. The
+screen shows the grid, per-bus status chips, "Laya's view" (the dispatch
+state sent) and "Laya's decisions" (assignment bars, confidence, latency,
+history). Toggle laya dispatch off to compare against a greedy nearest-bus
+heuristic; sliders tune demand frequency and bus speed.
+
+The simulation, the domain rules and the question text live in
+`static/fleet_sim.js` — a pure, seeded, DOM-free module. `fleet.html` is only
+the DOM layer over it, and `eval_rules.mjs` imports the same file, so the
+browser and the A/B harness cannot drift apart.
+
+#### Domain rules: where they go, and why
+
+The interesting question this demo answers is **where a domain rule belongs in
+a System-1 model**. The rules here — a bus may carry several demands at once,
+and a demand near a bus's current route is nearly free to add — are not in the
+weights. laya does not execute rules, it reads text, so a bare assertion
+("a bus may carry 2 demands") changes nothing. The rules are injected in four
+places, each doing a different job:
+
+| Tier | Where | What it carries |
+| --- | --- | --- |
+| 0 | code, not text | hard constraints — filter the option set so a rule is *unviolable* rather than *likely* |
+| 1 | per-option `criteria` | the rule's derived numbers, one per bus |
+| 2 | question `instructions` | the policy, constant across decisions |
+| 3 | first key of the state | scenario-level rules |
+| 4 | fine-tuning | last resort, gated on measurement |
+
+Tier 1 is the one that matters, because of how the checkpoint is wired:
+`build_sequence()` puts each option's criteria immediately before its `[MASK]`,
+and the decision is the hidden state *at that mask*. The criteria are the
+scorer's literal input.
+
+The arithmetic lives in JS, not the model. `insertionCost()` is the multi-pickup
+rule made computable — the classic VRP insertion heuristic: fewest extra blocks
+for a bus to also serve this pickup, by slotting it between waypoints on the
+route it is already driving. A pickup already on that route therefore costs ~0,
+where `costOf()` (the serial nearest-bus measure) would charge a full deadhead
+for the same bus. Each option's criteria reports the result:
+
+```
+bus_b: "Bus B: pickup on its route, +0 blocks; 4 seats free"
+```
+
+The state also carries a `rules:` line, and it is the **first** key: laya's
+`build_sequence()` truncates the state from the right (`st = st[:room]`,
+`truncate_left` is never set by `Agent.system_one`), so anything at the tail of
+a long state is dropped silently. At the current fleet size that is not yet
+binding — a mid-episode state is ~272 tokens against a ~459-token budget on the
+`english` checkpoint — but it is free insurance as the state grows.
+
+#### Measuring it
+
+```sh
+uv run uvicorn server:app            # terminal 1
+node eval_rules.mjs --n 200 --seed 7 # terminal 2
+```
+
+The harness generates scenarios *counterfactually*: a sim is driven forward by
+the greedy policy and every decision tick is snapshotted, then both arms answer
+the *same* snapshots differing only in question text. That isolates the decision
+instead of letting one arm's assignments steer the other arm's future inputs.
+
+Over 200 scenarios, 197 of which had a real nearest-vs-least-detour conflict:
+
+```
+                              no-rules           rules          greedy
+mean detour regret            13.38 blk        1.29 blk       11.66 blk
+picks least-detour               31.0%           93.9%           30.5%
+picks nearest                    76.5%           37.5%          100.0%
+mean deadhead regret            5.54 blk       25.13 blk        0.00 blk
+head tokens (est)                   48             119               —
+ms                                110             149               —
+```
+
+So the injection works — mean regret against the least-detour bus drops ~10× and
+the model follows the criteria. It is not free: deadhead regret rises, the head
+grows 48 → 119 tokens, and latency goes 110 → 149 ms.
+
+**And it does not yet pay off end to end.** The closed loop in the same run
+delivers 76.0 (rules) vs 78.3 (greedy) out of 200 demands. That is not noise to
+be tuned away — it is the honest consequence of a gap: the simulator is still
+**serial** (a bus serves its queue one job at a time) while `insertionCost`
+prices a bus as if it could multi-pickup. Optimising for detour optimises for a
+capability the world does not have yet. Multi-pickup physics (seats, a
+manifest, en-route insertion) is the next piece of work, and the closed-loop
+number is the canary that will show whether it landed.
+
+#### Confidence gating
+
+`fleet.html` falls back to the deterministic cost model when laya's confidence
+is below `CONF_FLOOR`, and shows a **decided / deferred** counter in the HUD —
+because a gate silently caps how often the model actually decides, and a gate
+tuned until laya "always agrees" has removed laya from the loop.
+
+The floor is set from the measured distribution, not guessed. Confidence on this
+workload is heavily compressed near zero (p10 0.011, p50 0.057, p95 0.194),
+because the checkpoint ships `temperature_by_options["choice:3-5"] = 1.76`,
+which softens the logits, and a near-uniform 3-way distribution has low entropy
+confidence. An earlier guess of 0.45 deferred **100%** of decisions — the rules
+were in the prompt and laya never got to use them.
+
+`act_probability` is reported but deliberately *not* gated on: measured at
+1.000 across every percentile here, so a floor on it would be dead code.
+
+#### Fine-tuning
+
+Not done, and gated on the measurement above. `laya` ships no training code,
+though `common.py` does expose `build_model`, `collate_items`, `proper_reward`
+and `td_lambda_targets`, and the config is named `rl_agent_config.json` with a
+`training` block — so a finetune means writing a loop against `DecisionModel`
+ourselves, with the simulator as both reward oracle and expert. Two costs to
+name up front: 421M parameters on MPS iterates slowly, and narrow fine-tuning
+of a third-party checkpoint tends to wreck the calibration that `confidence`
+currently provides — which would also break the gate above. If the rules arm
+closes the gap on the conflicting scenarios, do not finetune.
 
 ## Sensor anomaly detection
 

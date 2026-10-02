@@ -130,6 +130,23 @@ const el = (tag, props = {}, ...kids) => {
  * after every mutation so the host can restart the run and re-render the fleet.
  */
 export function mountOntologyPanel({ root, getSim, onChange }) {
+  // Created once, outside rerender(), so it survives an axiom edit and can be refreshed
+  // independently. The ABox is a live view of the running sim; the axiom list is a form.
+  const aboxHost = el("div", { className: "abox" });
+
+  /** Repaint only the ABox. Cheap enough to call a few times a second. */
+  const refreshABox = () => {
+    const rows = aboxFor(getSim().buses);
+    aboxHost.replaceChildren(...rows.map(b => el("div", { className: "abrow" },
+      el("strong", { textContent: b.id }),
+      ` at (${b.position}) · ${b.aboard.length} aboard [${b.aboard.join(",") || "—"}] · ${b.stops} stops`,
+      b.violations.length
+        ? el("span", { className: "bad", textContent: ` · ${b.violations.length} violation(s)` })
+        : null,
+      b.unasserted.length ? el("span", { className: "warn", textContent: " · unasserted" }) : null,
+    )));
+  };
+
   const rerender = () => {
     const sim = getSim();
     const status = tboxStatus();
@@ -224,16 +241,11 @@ export function mountOntologyPanel({ root, getSim, onChange }) {
     ));
 
     // --- what the ontology currently believes
-    const abox = el("div", { className: "abox" });
-    for (const b of aboxFor(sim.buses)) {
-      abox.append(el("div", { className: "abrow" },
-        el("strong", { textContent: b.id }),
-        ` at (${b.position}) · ${b.aboard.length} aboard [${b.aboard.join(",") || "—"}] · ${b.stops} stops`,
-        b.violations.length ? el("span", { className: "bad", textContent: ` · ${b.violations.length} violation(s)` }) : null,
-        b.unasserted.length ? el("span", { className: "warn", textContent: " · unasserted" }) : null,
-      ));
-    }
-    root.append(el("h2", { textContent: "Ontology — ABox (what it currently believes)" }), abox);
+    // aboxHost is created once and reused across every rerender, so it can be refreshed
+    // on a timer without touching the axiom rows — rebuilding the whole panel on a tick
+    // would steal focus from the seat-limit input mid-edit.
+    root.append(el("h2", { textContent: "Ontology — ABox (what it currently believes)" }),
+                aboxHost);
 
     // --- enforcement toggle
     const toggle = el("input", { type: "checkbox" });
@@ -256,5 +268,5 @@ export function mountOntologyPanel({ root, getSim, onChange }) {
   };
 
   rerender();
-  return { rerender };
+  return { rerender, refreshABox };
 }

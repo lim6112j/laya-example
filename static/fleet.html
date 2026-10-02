@@ -396,6 +396,7 @@ function showError(message) {
 
 let retryCooldown = 0;
 let retryBusy = false;
+let aboxCooldown = 0;
 
 function tick(dt) {
   if (!running || paused) return;
@@ -411,6 +412,18 @@ function tick(dt) {
     retryCooldown = 0.5;
     retryWaiting();
   }
+
+  // The ABox is a live view of the running sim, so it has to follow it — but only the
+  // ABox. Rebuilding the whole panel on a timer would steal focus from the seat-limit
+  // input mid-edit, and only repaints the rows, not the form.
+  aboxCooldown -= dt;
+  if (aboxCooldown <= 0) {
+    aboxCooldown = 0.4;
+    if (document.getElementById("ontologyPanel").closest("details")?.open) {
+      ontologyPanel.refreshABox();
+    }
+  }
+
   updateHud();
   updateChips();
 }
@@ -561,6 +574,7 @@ function startSim() {
     feasibility: sim.config.feasibility,
   }});
   decided = 0; deferred = 0; unserved = 0; retryCooldown = 0; retryBusy = false;
+  aboxCooldown = 0;
   running = true; paused = false;
   document.getElementById("pauseBtn").textContent = "Pause";
   document.getElementById("history").innerHTML = "";

@@ -19,7 +19,9 @@
 import {
   createSim, step, assignTo, buildState, buildBaselineState, buildQuestion,
   buildBaselineQuestion, detourCost, nearestCost, feasible, rankedByNearest, headEstimate,
+  insertStops, RULES,
 } from "./static/fleet_sim.js";
+import { canServe, reason, checkTBox, TBOX } from "./static/ontology.js";
 
 function parseArgs(argv) {
   const out = {};
@@ -107,7 +109,58 @@ const ARMS = {
     }
     return { state: buildState(s, sc.passenger), question: q };
   },
+  // Identical to `rules` except that Tier 0 is answered by the TBox/ABox reasoner rather
+  // than the hand-written seat loop. Everything the model sees is the same, so any
+  // difference in outcome is attributable to the constraint layer alone.
+  "ontology": sc => {
+    const s = simOf(sc);
+    s.config.feasibility = ontologyFeasibility;
+    return { state: buildState(s, sc.passenger), question: buildQuestion(s, sc.passenger) };
+  },
 };
+
+/**
+ * Tier 0 through the ontology. Wraps the reasoner in the shape `insertSeq` expects, and
+ * keeps the bus in scope for the ABox, which is built per candidate route.
+ */
+function ontologyFeasibility(cand, bus) {
+  return canServe(bus, cand, RULES.seats).ok;
+}
+
+/**
+ * Would the two constraint layers reach the same conclusion? Run the insertion search both
+ * ways over every scenario and compare. This is the check that makes the ontology claim
+ * falsifiable: a hand-rolled `if` cannot be wrong in a way you can detect, but a declared
+ * axiom set can be compared against the thing it replaces.
+ */
+function divergenceCheck(scenarios) {
+  const out = { compared: 0, disagreed: [], ontologyViolations: 0, extraAxioms: new Set() };
+  for (const sc of scenarios) {
+    for (const p of [sc.passenger]) {
+      for (const bus of sc.buses) {
+        const hand = insertStops(bus, p, RULES.seats);
+        const ont = insertStops(bus, p, RULES.seats, ontologyFeasibility);
+        out.compared++;
+        const sameNull = (hand === null) === (ont === null);
+        const sameDelta = sameNull && (hand === null || Math.abs(hand.delta - ont.delta) < 1e-9);
+        if (!sameDelta) {
+          out.disagreed.push({
+            bus: bus.id, demand: p.id,
+            hand: hand ? `+${hand.delta.toFixed(2)}` : "no route",
+            ontology: ont ? `+${ont.delta.toFixed(2)}` : "no route",
+          });
+        }
+        // Surface anything the reasoner flagged that the seat limit did not account for.
+        if (ont) {
+          for (const v of canServe(bus, ont.stops, RULES.seats, p).violations) {
+            if (v.axiom !== "bus-capacity") out.extraAxioms.add(v.axiom);
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
 
 // ---- scoring -----------------------------------------------------------------
 
@@ -160,7 +213,50 @@ const mean = xs => xs.reduce((a, b) => a + b, 0) / (xs.length || 1);
 const pct = x => `${(100 * x).toFixed(1)}%`;
 const pick = (rows, k) => mean(rows.map(r => r[k]));
 
-const arms = ["no-rules", "rules", "rules-nofilter", "greedy"];
+const arms = ["no-rules", "rules", "rules-nofilter", "ontology", "greedy"];
+
+// ---- ontology: self-check and divergence --------------------------------------
+// This costs no API calls and is the load-bearing result for the ontology arm: the two
+// constraint layers are run over every scenario's bus/demand pair and compared. Zero
+// disagreements means the TBox faithfully reimplements what it replaces. Non-zero means
+// the ontology is wrong somewhere, and the cause is a finding, not a number to tune.
+
+const tbox = checkTBox(TBOX);
+const divergence = divergenceCheck(scenarios);
+const ontologyCost = (() => {
+  const bus = scenarios[0]?.buses[0];
+  if (!bus) return 0;
+  const p = scenarios[0].passenger;
+  const stops = insertStops(bus, p, RULES.seats)?.stops ?? [];
+  const N = 20000, t0 = process.hrtime.bigint();
+  for (let i = 0; i < N; i++) canServe(bus, stops, RULES.seats, p);
+  return Number(process.hrtime.bigint() - t0) / 1000 / N;
+})();
+
+console.log(`\n=== ontology: TBox self-check ===`);
+console.log(tbox.satisfiable
+  ? "  satisfiable — the axiom set is coherent"
+  : "  UNSATISFIABLE:\n" + tbox.unsatisfiable.map(u => `    ${u.id}: ${u.reason}`).join("\n"));
+
+console.log(`\n=== ontology: divergence from the hand-written constraint layer ===`);
+console.log(`  ${divergence.compared} bus/demand pairs compared, ` +
+            `${divergence.disagreed.length} disagreements`);
+if (divergence.disagreed.length) {
+  for (const d of divergence.disagreed.slice(0, 10)) {
+    console.log(`    bus ${d.bus} demand #${d.demand}: hand-written ${d.hand}, ontology ${d.ontology}`);
+  }
+  if (divergence.disagreed.length > 10) {
+    console.log(`    … and ${divergence.disagreed.length - 10} more`);
+  }
+}
+if (divergence.extraAxioms.size) {
+  console.log(`  axioms the seat limit alone does not account for: ` +
+              `${[...divergence.extraAxioms].join(", ")}`);
+} else {
+  console.log(`  no other axiom was triggered — the seat limit was the only binding constraint here`);
+}
+console.log(`  reasoning cost ${ontologyCost.toFixed(2)} us per route check, against a ` +
+            `~136000 us decision`);
 
 /** Run every arm against one model, print its table, and return the rows. */
 async function runCounterfactual(model) {
@@ -170,7 +266,7 @@ async function runCounterfactual(model) {
   for (let i = 0; i < WARMUP; i++) await ask("rules", scenarios[0]);
 
   const results = {};
-  for (const arm of Object.keys(ARMS)) {
+  for (const arm of Object.keys(ARMS).filter(a => a !== "greedy")) {
     const rows = [];
     for (const sc of scenarios) {
       let r;

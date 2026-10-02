@@ -15,6 +15,13 @@
 //   false — a demand waits in the queue; a bus carries exactly one, ever
 // The cost model branches with it, because a pickup on your route is only cheap if you
 // can actually stop for it.
+//
+// Tier 0 (hard constraints) can be answered two ways: the hand-written `capacityOk` below,
+// which is the default and what the browser runs, or the TBox/ABox reasoner in ontology.js,
+// injected per call. The import is one-way — ontology.js never imports this module — so
+// the two cannot form a cycle, and swapping the predicate is opt-in.
+
+import { canServe as ontologyCanServe } from "./ontology.js";
 
 export const GRID = 50;
 
@@ -150,7 +157,16 @@ export function capacityOk(stops, onboard, seats) {
  * are 3 buses, so the O(n^2) slot scan is free. Returns null when no placement fits
  * the seat limit.
  */
-export function insertSeq(bus, newStops, seats = RULES.seats) {
+export function insertSeq(
+  bus,
+  newStops,
+  seats = RULES.seats,
+  // Feasibility is injected so the ontology reasoner can stand in for the hand-written
+  // seat check without this module depending on it. The default IS the hand-written path,
+  // which is what the browser runs — swapping the predicate is opt-in, so the ontology
+  // can be measured against the thing it replaces without being able to disturb it.
+  isFeasible = cand => capacityOk(cand, bus.onboard, seats),
+) {
   const base = bus.stops, here = busPos(bus);
   const before = routeLength(here, base);
   const slots = base.length + newStops.length;
@@ -164,7 +180,7 @@ export function insertSeq(bus, newStops, seats = RULES.seats) {
         if (k < chosen.length && chosen[k] === idx) { cand.push(newStops[k]); k++; }
         else cand.push(base[bi++]);
       }
-      if (!capacityOk(cand, bus.onboard, seats)) return;
+      if (!isFeasible(cand, bus)) return;
       const len = routeLength(here, cand);
       if (best === null || len < best.len) best = { len, stops: cand, delta: len - before };
     }
@@ -189,15 +205,35 @@ export function insertSeq(bus, newStops, seats = RULES.seats) {
 export const planHorizon = (seats = RULES.seats) => 2 * seats;
 
 /** Splice a whole demand — pickup and dropoff — into the route. */
-export function insertStops(bus, passenger, seats = RULES.seats) {
+export function insertStops(bus, passenger, seats = RULES.seats, isFeasible) {
   if (bus.stops.length + 2 > planHorizon(seats)) return null;
-  return insertSeq(bus, [stop("pickup", passenger), stop("dropoff", passenger)], seats);
+  return insertSeq(bus, [stop("pickup", passenger), stop("dropoff", passenger)], seats, isFeasible);
+}
+
+/**
+ * The feasibility predicate a sim is currently using: whatever the caller injected via
+ * `sim.config.feasibility`, else the hand-written seat check. Every path that asks "can
+ * this bus take it" goes through here, so swapping the constraint layer is one assignment
+ * rather than a search for call sites that were missed.
+ */
+export const feasibilityFor = sim =>
+  sim.config.feasibility ?? ((cand, bus) => capacityOk(cand, bus.onboard, RULES.seats));
+
+/**
+ * Feasibility through the ontology rather than the hand-written seat loop. Same shape as
+ * `feasible()`, so it drops into the same call sites — this is the Tier 0 boundary being
+ * answered by "is the assignment consistent with the TBox?" instead of "is the number
+ * small?". `bus` and `passenger` are the sim's own objects; buildABox reads the fields it
+ * needs and the reasoner never sees the rest.
+ */
+export function ontologyPredicate(sim) {
+  return (cand, bus) => ontologyCanServe(bus, cand, sim).ok;
 }
 
 /** Can this bus take this demand at all, in the world the sim is currently in? */
 export function feasible(bus, passenger, sim) {
   if (!sim.config.multiPickup) return true;   // it can queue, however long that takes
-  return insertStops(bus, passenger) !== null;
+  return insertStops(bus, passenger, RULES.seats, feasibilityFor(sim)) !== null;
 }
 
 /** Seats not currently occupied. In serial mode a busy bus reports 0, honestly. */
@@ -220,7 +256,7 @@ export function seatsLeft(bus, sim) {
 export function assignTo(sim, bus, passenger) {
   if (!bus) return false;
   if (sim.config.multiPickup) {
-    const ins = insertStops(bus, passenger);
+    const ins = insertStops(bus, passenger, RULES.seats, feasibilityFor(sim));
     if (!ins) return false;
     bus.stops = ins.stops;
   } else {
@@ -320,7 +356,7 @@ export function serialCost(bus, p) {
  */
 export function detourCost(bus, p, sim) {
   if (!sim.config.multiPickup) return serialCost(bus, p);
-  const ins = insertStops(bus, p);
+  const ins = insertStops(bus, p, RULES.seats, feasibilityFor(sim));
   return ins ? ins.delta : serialCost(bus, p);
 }
 
@@ -332,7 +368,7 @@ export function detourCost(bus, p, sim) {
  */
 export function pickupDetour(bus, p, sim) {
   if (!sim.config.multiPickup) return serialCost(bus, p);
-  const ins = insertSeq(bus, [stop("pickup", p)]);
+  const ins = insertSeq(bus, [stop("pickup", p)], RULES.seats, feasibilityFor(sim));
   return ins ? ins.delta : serialCost(bus, p);
 }
 

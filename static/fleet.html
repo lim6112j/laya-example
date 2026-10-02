@@ -117,11 +117,15 @@
   <p>50×50 grid, three autonomous buses. Every new passenger demand goes to CJet:
      <code>assign: choice(bus_a/bus_b/bus_c)</code> — distance, load and seats all in prose.
      The domain rules are injected into the question, not learned. Toggle
-     <strong>Multi-pickup physics</strong> to switch the world: on, a bus carries up to
-     four demands at once and the option criteria report how many blocks each bus would
+     <strong>Multi-pickup physics</strong> to switch the world: on, a bus carries several
+     demands at once and the option criteria report how many blocks each bus would
      <em>add</em> to the route it is already driving; off, a bus carries one and a nearby
      pickup buys nothing. Same rules, same cost function, different world — the delivered
      count shows which one the rule was written for.
+     <br>Four seats is the <em>capacity</em> a bus offers; what actually caps new work is
+     its planning horizon — a bus already committed to a full route turns work away with
+     seats to spare, which is what <strong>Over-committed</strong> counts. Edit the seat
+     limit and the axioms themselves in the Ontology panel below.
      Dispatch off = greedy nearest-bus heuristic. <a href="/">← back to the main UI</a></p>
 </header>
 <main>
@@ -217,16 +221,19 @@ const W = GRID * CELL, H = GRID * CELL;
 // the decided/deferred split is shown in the HUD rather than hidden — a gate tuned
 // until laya "always agrees" has removed laya from the loop.
 //
-// The floor is set from the measured distribution, not guessed. Over 60 fleet
-// scenarios the rules arm's confidence is heavily compressed near zero
-// (p10 0.004, p50 0.041, p95 1.000), because the checkpoint ships
-// temperature_by_options["choice:3-5"] = 1.76, which softens the logits, and a
-// near-uniform 3-way distribution has low entropy confidence. An earlier guess of
-// 0.45 deferred 100% of decisions — the rules were in the prompt but laya never
-// got to use them. 0.013 sits near the 20th percentile and defers roughly a
-// fifth. Re-run `node eval_rules.mjs` after changing the question to re-derive
-// it: the distribution moves with the criteria text.
-const CONF_FLOOR = 0.013;
+// The floor is the measured 10th percentile, not a guess. Over 200 fleet scenarios
+// the rules arm's confidence is heavily compressed near zero (p10 0.002, p50 0.033,
+// p95 1.000), because the checkpoint ships temperature_by_options["choice:3-5"] =
+// 1.76, which softens the logits, and a near-uniform 3-way distribution has low
+// entropy confidence. An earlier guess of 0.45 deferred 100% of decisions — the rules
+// were in the prompt but laya never got to use them. A later value of 0.013 sat near
+// the 20th percentile and deferred twice what this comment claimed, which is how it
+// went unnoticed; the number and the claim now agree.
+//
+// Re-derive after changing the question: `node eval_rules.mjs --n 200` prints the
+// percentiles, and the distribution moves with the criteria text. This is a
+// per-model constant — see the note in README on swapping the backend.
+const CONF_FLOOR = 0.002;
 
 const canvas = document.getElementById("sim");
 const ctx = canvas.getContext("2d");

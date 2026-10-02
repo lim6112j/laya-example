@@ -234,7 +234,7 @@ Three things worth separating out:
 - **Confidence is not comparable across models.** laya's rules arm sits at
   p50 0.033 because `temperature_by_options["choice:3-5"] = 1.76` flattens its
   logits; Jev reports p50 0.880 on the same question. The `CONF_FLOOR` tuned on
-  laya (0.013) is effectively a no-op for Jev — every Jev decision clears it. A
+  laya (0.002) is effectively a no-op for Jev — every Jev decision clears it. A
   gate is a per-model constant, and moving models means re-deriving it.
 - **Cost and latency.** Jev is $0.000032 a decision at this question size
   ($0.042/1M input tokens) — about six-tenths of a cent for 200 decisions. The
@@ -342,15 +342,21 @@ which softens the logits, and a near-uniform 3-way distribution has low entropy
 confidence. An earlier guess of 0.45 deferred **100%** of decisions — the rules
 were in the prompt and laya never got to use them.
 
-`CONF_FLOOR` is 0.013, which against the current distribution sits near the 20th
-percentile and defers roughly a fifth of decisions. The p95 of 1.000 is the capacity
-filter showing through — when only one bus has room, the model is not choosing, and
-the HUD counter is what makes that visible rather than an accident.
+`CONF_FLOOR` is **0.002**, the measured 10th percentile of the rules arm's confidence
+over 200 scenarios (p10 0.002, p50 0.033, p95 1.000). It defers roughly a tenth of
+decisions. An intermediate value of 0.013 sat near the 20th percentile and deferred twice
+what the comment beside it claimed, which is how it went unnoticed — the number and the
+claim now agree. Re-derive it with `node eval_rules.mjs --n 200`; the distribution moves
+with the criteria text.
+
+The p95 of 1.000 is the capacity filter showing through — when only one bus has room,
+the model is not choosing, and the HUD counter is what makes that visible rather than an
+accident.
 
 **The floor is per-model, and this is the trap worth knowing about.** It is
 calibrated to laya's distribution (p50 0.033), which is compressed near zero by the
 checkpoint's own temperature. Jev reports p50 0.880 for the same question, so the
-same 0.013 defers nothing at all — selecting `jev` in the browser defers 0 of 27
+same 0.002 defers nothing at all — selecting `jev` in the browser defers 0 of 27
 decisions, while laya defers about a fifth. Moving models means re-deriving this
 constant from that model's percentiles, and reusing a floor across models is not
 neutral: it silently disables the gate rather than mis-setting it.
@@ -486,7 +492,7 @@ laya의 `[MASK]` 스코어러 구조에 특화된 트릭이었다면 Jev에서�
 - 재현성: 시뮬레이션이 시드 고정·결정론적이며, 같은 시나리오에서 동일 재현
 - **모델 교체 시 신뢰도 게이트는 재파생해야 합니다.** laya의 신뢰도는
   p50 0.033, Jev는 같은 질문에 p50 0.880입니다. laya에 맞춰 잡은 임계값
-  (0.013)을 그대로 쓰면 Jev에서는 **무효**가 되어 27건 중 0건만 게이트됩니다.
+  (0.002)을 그대로 쓰면 Jev에서는 **무효**가 되어 27건 중 0건만 게이트됩니다.
   임계값은 모델별 상수이고, 모델을 바꾸면 재측정 없이 그대로 두면 게이트가
   조용히 꺼집니다.
 

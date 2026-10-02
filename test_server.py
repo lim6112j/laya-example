@@ -175,3 +175,145 @@ def test_concurrent_predictions_are_serialized(client, monkeypatch):
     for thread in threads:
         thread.join()
     assert not overlap, "router.predict ran concurrently"
+
+
+# ---- jev ---------------------------------------------------------------------
+# These stub jev.predict, so the suite needs neither a network nor an API key.
+
+JEV_REPLY = {
+    "model": "typesafe/jev-1.13-20260917",
+    "provider": "TypeSafe",
+    "answers": {
+        "assign": {
+            "type": "choice",
+            "choice": "bus_b",
+            "probabilities": {"bus_a": 0.3, "bus_b": 0.55, "bus_c": 0.15},
+            "confidence": 0.42,
+        }
+    },
+    "usage": {"input_tokens": 373, "output_tokens": 42},
+    "cost_usd": 1.5666e-05,
+}
+
+
+@pytest.fixture()
+def jev_stub(monkeypatch):
+    """Stub the Jev client and hand back the calls it received."""
+    calls = []
+
+    def fake_predict(state, questions, **kwargs):
+        calls.append({"state": state, "questions": questions, **kwargs})
+        return dict(JEV_REPLY)
+
+    monkeypatch.setattr(server_module.jev, "predict", fake_predict)
+    return calls
+
+
+def test_jev_branch_returns_laya_shaped_result(client, jev_stub):
+    """Jev answers through the same envelope, so no client needs a branch."""
+    test_client, stub = client
+    response = test_client.post("/api/predict", json={
+        "state": {"body": "hi"},
+        "questions": {"assign": VALID_CHOICE},
+        "model": "jev",
+    })
+    assert response.status_code == 200
+    body = response.json()
+    assert body["result"]["answers"]["assign"]["choice"] == "bus_b"
+    assert body["result"]["cost_usd"] == 1.5666e-05
+    assert body["routing"]["model"] == "jev"
+    # The laya router is never touched on this path.
+    assert not hasattr(stub, "last_call")
+    assert jev_stub[0]["state"] == {"body": "hi"}
+    assert jev_stub[0]["questions"]["assign"]["criteria"] == VALID_CHOICE["criteria"]
+
+
+def test_jev_answer_has_no_act_probability(client, jev_stub):
+    """Jev omits action.act_probability; clients must tolerate its absence."""
+    test_client, _ = client
+    body = test_client.post("/api/predict", json={
+        "state": {"body": "hi"},
+        "questions": {"assign": VALID_CHOICE},
+        "model": "jev",
+    }).json()
+    answer = body["result"]["answers"]["assign"]
+    assert "action" not in answer
+    # fleet.html reads it as (answer.action || {}).act_probability ?? 1
+    assert (answer.get("action") or {}).get("act_probability", 1) == 1
+
+
+def test_jev_works_while_the_laya_router_is_missing(client, jev_stub, monkeypatch):
+    """Jev never touches the local model, so it must not 503 on a cold router."""
+    test_client, _ = client
+    monkeypatch.setattr(server_module._RouterState, "router", None)
+    response = test_client.post("/api/predict", json={
+        "state": {"body": "hi"},
+        "questions": {"assign": VALID_CHOICE},
+        "model": "jev",
+    })
+    assert response.status_code == 200
+
+
+def test_jev_does_not_take_the_predict_lock(client, jev_stub, monkeypatch):
+    """The lock exists for MPS/Metal; a ~1s network call must not serialise on it."""
+    import threading
+
+    test_client, _ = client
+    overlap = []
+
+    def slow_predict(state, questions, **kwargs):
+        overlap.append(1)
+        time.sleep(0.05)
+        overlap.remove(1)
+        return dict(JEV_REPLY)
+
+    monkeypatch.setattr(server_module.jev, "predict", slow_predict)
+    threads = [
+        threading.Thread(
+            target=test_client.post,
+            args=("/api/predict",),
+            kwargs={"json": {"state": {"body": "hi"},
+                             "questions": {"assign": VALID_CHOICE},
+                             "model": "jev"}},
+        )
+        for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not overlap, "jev.predict ran while holding predict_lock"
+
+
+def test_jev_error_becomes_a_502_with_the_upstream_body(client, monkeypatch):
+    test_client, _ = client
+
+    def boom(state, questions, **kwargs):
+        raise server_module.jev.JevError("Jev request failed (402)", status=402,
+                                         body='{"error":{"message":"insufficient credit"}}')
+
+    monkeypatch.setattr(server_module.jev, "predict", boom)
+    response = test_client.post("/api/predict", json={
+        "state": {"body": "hi"},
+        "questions": {"assign": VALID_CHOICE},
+        "model": "jev",
+    })
+    assert response.status_code == 502
+    assert "insufficient credit" in response.json()["detail"]
+
+
+def test_jev_rejects_unknown_model_still(client, jev_stub):
+    test_client, _ = client
+    response = test_client.post("/api/predict", json={
+        "state": {"body": "hi"},
+        "questions": {"q": VALID_NOUL},
+        "model": "gpt-4",
+    })
+    assert response.status_code == 422
+
+
+def test_jev_requires_a_key(monkeypatch):
+    """A missing key must name the variable rather than fail opaquely."""
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(server_module.jev.JevError, match="OPENROUTER_API_KEY"):
+        server_module.jev.api_key()

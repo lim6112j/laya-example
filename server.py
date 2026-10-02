@@ -6,6 +6,11 @@ is preloaded once at startup (see laya_startup.py and README "Startup
 performance").
 
 Run with: uv run uvicorn server:app
+
+`model="jev"` swaps in TypeSafe's Jev through OpenRouter instead. Jev shares laya's
+typed-question interface and its answer shape (see jev.py), so this endpoint's contract
+and every client are unchanged — the only visible differences are latency, a reported
+cost, and the absence of laya's `act_probability`.
 """
 
 from __future__ import annotations
@@ -22,8 +27,10 @@ from pydantic import BaseModel, Field, field_validator
 
 from laya_startup import build_router
 
+import jev
+
 QuestionType = Literal["choice", "score", "noul"]
-ModelOverride = Literal["auto", "english", "multilingual", "typed-decisions"]
+ModelOverride = Literal["auto", "english", "multilingual", "typed-decisions", "jev"]
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -86,14 +93,34 @@ def _stringify_state(state: dict[str, Any]) -> dict[str, str]:
 
 @app.post("/api/predict")
 def predict(request: PredictRequest) -> dict[str, Any]:
-    router = _RouterState.router
-    if router is None:
-        raise HTTPException(status_code=503, detail="router is still loading")
     questions = {
         name: q.model_dump(exclude_none=True) for name, q in request.questions.items()
     }
+    start = time.perf_counter()
+
+    # Jev is a network call that never touches the local model, so it deliberately does
+    # NOT take predict_lock (that lock exists because concurrent encoder calls crash
+    # MPS/Metal) and deliberately does not 503 when the laya router is still loading —
+    # it does not need the router, only the key.
+    if request.model == "jev":
+        try:
+            result = jev.predict(_stringify_state(request.state), questions)
+        except jev.JevError as exc:
+            raise HTTPException(
+                status_code=502 if exc.status else 500,
+                detail=f"jev failed: {exc}" + (f" — {exc.body[:400]}" if exc.body else ""),
+            ) from exc
+        latency_ms = round((time.perf_counter() - start) * 1000, 1)
+        return {
+            "result": result,
+            "latency_ms": latency_ms,
+            "routing": {"model": "jev", "repo": jev.JEV_MODEL, "reason": "explicit model=jev"},
+        }
+
+    router = _RouterState.router
+    if router is None:
+        raise HTTPException(status_code=503, detail="router is still loading")
     try:
-        start = time.perf_counter()
         with _RouterState.predict_lock:
             result = router.predict(
                 _stringify_state(request.state),

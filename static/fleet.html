@@ -130,6 +130,7 @@
             <option value="auto">auto</option>
             <option value="english">english</option>
             <option value="typed-decisions">typed-decisions</option>
+            <option value="jev">jev (OpenRouter — slow, costs money)</option>
           </select></span>
         <span class="ctl"><label>New demand every</label>
           <input type="range" id="demandEvery" min="0.5" max="4" step="0.5" value="1.5">
@@ -257,9 +258,16 @@ async function retryWaiting() {
 async function askCJet(passenger, quiet = false) {
   const state = buildState(sim, passenger);
   const question = buildQuestion(sim, passenger);
+  const model = document.getElementById("model").value;
   if (!quiet) {
     document.getElementById("whoAsked").textContent = `Demand #${passenger.id} asked:`;
     document.getElementById("stateView").textContent = JSON.stringify(state, null, 2);
+    // Jev is a network call — around a second, against laya's ~150ms. Without this the
+    // panel just stops updating and the demo looks hung rather than slow.
+    if (model === "jev") {
+      document.getElementById("decisionMeta").textContent =
+        `demand #${passenger.id} · waiting for jev…`;
+    }
   }
   try {
     const response = await fetch("/api/predict", {
@@ -268,7 +276,7 @@ async function askCJet(passenger, quiet = false) {
       body: JSON.stringify({
         state,
         questions: { assign: question },
-        model: document.getElementById("model").value,
+        ...(model === "auto" ? {} : { model }),
       }),
     });
     const body = await response.json();
@@ -283,13 +291,15 @@ async function askCJet(passenger, quiet = false) {
     if (!bus) return null;
 
     // act_probability is reported but not gated on: measured at 1.000 across every
-    // percentile of this workload, so a floor on it would be dead code.
+    // percentile of this workload, so a floor on it would be dead code. Jev does not
+    // return the field at all, which the ?? handles.
     const act = (answer.action || {}).act_probability ?? 1;
     const gated = answer.confidence < CONF_FLOOR;
     if (!quiet) {
       const recommended = rankedByNearest(sim, passenger)[0];
       renderDecision(passenger, bus, recommended, answer.probabilities || {},
-        answer.confidence, body.latency_ms, gated, act);
+        answer.confidence, body.latency_ms, gated, act, body.result.cost_usd,
+        body.result.model || model);
     }
     if (gated) { if (!quiet) { deferred++; updateGateCounter(); } return null; }
     if (!quiet) { decided++; updateGateCounter(); }
@@ -306,7 +316,8 @@ function updateGateCounter() {
   el.textContent = `${decided} decided · ${deferred} deferred`;
 }
 
-function renderDecision(passenger, bus, recommended, probs, confidence, latency, gated, act) {
+function renderDecision(passenger, bus, recommended, probs, confidence, latency,
+                        gated, act, costUsd, model) {
   const bars = document.getElementById("decisionBars");
   bars.innerHTML = "";
   for (const label of ASSIGNMENTS) {
@@ -321,8 +332,12 @@ function renderDecision(passenger, bus, recommended, probs, confidence, latency,
     bars.appendChild(row);
   }
   const gateNote = gated ? " · below gate → deferred to the cost model" : "";
+  // Jev reports what the call cost; laya returns nothing because it runs locally, so
+  // absent means $0 marginal rather than unknown.
+  const costNote = costUsd ? ` · $${costUsd.toFixed(6)}` : "";
   document.getElementById("decisionMeta").textContent =
-    `demand #${passenger.id} · confidence ${confidence} · act ${act} · latency ${latency} ms${gateNote}`;
+    `demand #${passenger.id} · ${model || "?"} · confidence ${confidence} · act ${act} · ` +
+    `latency ${latency} ms${costNote}${gateNote}`;
 
   const history = document.getElementById("history");
   const entry = document.createElement("div");

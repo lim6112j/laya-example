@@ -151,30 +151,99 @@ a fixed policy and every decision tick is snapshotted, then every arm answers
 the *same* snapshots differing only in question text. That isolates the decision
 instead of letting one arm's assignments steer the other arm's future inputs.
 
-Over 60 scenarios, 59 of which had a real nearest-vs-least-detour conflict:
+> **The no-rules baseline was re-measured and the old number was wrong.** The arm
+> reported below used to strip only the `rules:` key, which left the rule in two other
+> places: `recommendation` ended with a sentence built from `detourCost()` and
+> `isOnRoute()` — that sentence *is* the rule — and `fleet` was `busText()`, which
+> reports seats and multi-stop plans and so presupposes the world the rule describes.
+> "No rules" was quietly a rules baseline. `buildBaselineState()` is a separate builder
+> with none of that in it, and the clean baseline is roughly **twice as bad** (19.25 →
+> 38.33 blocks). The rules arm is unchanged, so the apparent improvement grew — and that
+> growth is not a new result, it is an old baseline being corrected.
+
+Over 200 scenarios, 195 of which had a real nearest-vs-least-detour conflict:
 
 ```
                               no-rules           rules  rules-nofilter          greedy
-mean detour regret           19.25 blk        3.37 blk        6.11 blk       27.47 blk
-picks least-detour               63.3%           91.7%           88.3%           51.7%
-picks nearest                    60.0%           66.7%           66.7%           80.0%
-capacity violations                 10               0               2              12
-mean confidence                  0.120           0.124           0.057           0.000
+mean detour regret           38.33 blk        6.43 blk        6.23 blk       34.60 blk
+picks least-detour               39.0%           79.0%           83.6%           48.7%
+picks nearest                    65.5%           55.0%           60.0%           76.5%
+capacity violations                 51               0               4              48
+mean confidence                  0.057           0.103           0.051           0.000
 head tokens (est)                   48             137             137               —
-ms                                114             153             158               —
+ms                                 81             136             141               —
 ```
 
 Two things to read here. The **injection works** — regret against the
 least-detour bus drops ~6× and the model follows the criteria. And the
 **capacity filter (Tier 0) is doing real work**: `rules` never assigns to a bus
-that has no room, while the unfiltered arm does so twice and the naive
-nearest-bus dispatcher does so twelve times. Omitting an infeasible option
-makes the rule unviolable rather than merely likely, and it improves routing
-quality as a side effect (3.37 vs 6.11 regret) by removing distractors.
+that has no room, while the unfiltered arm does so four times and the naive
+nearest-bus dispatcher forty-eight. Omitting an infeasible option makes the rule
+unviolable rather than merely likely.
+
+Note also how close `no-rules` sits to `greedy` (38.33 vs 34.60). Out of the box,
+laya is barely better than "send it to the closest bus" on a domain it was never
+trained on — which is the whole reason the injection is doing something.
 
 `no-rules` and `greedy` show *negative* nearest-regret, which is not a bug: the
 optimum is restricted to buses that can take the work, and the naive dispatcher
 picks the closest bus whether or not it has room.
+
+#### Does it transfer? laya vs Jev
+
+Everything above rests on one model, and the obvious objection is that reading
+criteria off an option is specific to how laya's scorer reads a `[MASK]`. That is
+testable, because **Jev** (TypeSafe, `typesafe/jev-1.13`) has the same interface:
+the same typed questions over the same state, answering with the same
+`{type, choice, probabilities, confidence}`. `server.py` takes `model: "jev"` and
+swaps the backend; `jev.py` normalises the response into laya's envelope so no
+client has a branch on who answered.
+
+```sh
+node eval_rules.mjs --compare --n 200 --seed 7     # both models, both arms
+node eval_rules.mjs --model jev --n 200            # one model
+```
+
+200 scenarios, 195 conflicting. Same scenarios, same scoring, both models:
+
+| | arm | detour regret | picks least-detour | capacity viol. | $ / decision | ms |
+|---|---|---|---|---|---|---|
+| laya | no-rules | 38.33 blk | 39.0% | 51 | $0 local | 81 |
+| laya | rules | 6.43 blk | 79.0% | **0** | $0 local | 136 |
+| Jev | no-rules | 35.18 blk | 45.5% | 47 | $0.000022 | 276 |
+| Jev | rules | **1.54 blk** | **91.0%** | **0** | $0.000032 | 269 |
+
+**It transfers, and transfers better.** Both models are close to useless on this
+domain out of the box — laya's no-rules arm (38.33) is *worse than the naive
+nearest-bus dispatcher* (34.60), and Jev's (35.18) is no better. Neither has
+priors about a bus fleet. With the criteria injected, laya drops 6× and Jev drops
+**23×**, landing at 1.54 blocks — within ~2% of the cost-optimal choice on a
+scenario set neither model was trained for. So the technique is a property of
+System-1 models, not of laya, which is the load-bearing claim in the IR section
+below.
+
+Three things worth separating out:
+
+- **The capacity filter behaves differently by model.** With the option removed,
+  both models record 0 violations. Without the filter, laya commits 4 and Jev
+  commits **0** — Jev reads "full, no room" in the criteria and declines on its
+  own. Tier 0 is what makes the rule unviolable for a weaker reader; a stronger
+  one can be told. `rules-nofilter` on Jev (0.98 blk) is in fact slightly *better*
+  than filtered (1.54) — with all three options visible it picks better among the
+  feasible ones, so on Jev the filter costs a little and buys nothing.
+- **Confidence is not comparable across models.** laya's rules arm sits at
+  p50 0.033 because `temperature_by_options["choice:3-5"] = 1.76` flattens its
+  logits; Jev reports p50 0.880 on the same question. The `CONF_FLOOR` tuned on
+  laya (0.013) is effectively a no-op for Jev — every Jev decision clears it. A
+  gate is a per-model constant, and moving models means re-deriving it.
+- **Cost and latency.** Jev is $0.000032 a decision at this question size
+  ($0.042/1M input tokens) — about six-tenths of a cent for 200 decisions. The
+  real difference is that it is a network call: 269 ms against laya's 136 ms, and
+  laya's marginal cost is zero because it runs locally.
+
+Note that this comparison measures *how well each model uses what it is given*,
+not domain knowledge: the no-rules arm still contains a nearest-bus recommendation
+in prose, by design. Both models get the same hint.
 
 #### The two worlds, and which one the rule is for
 
@@ -274,15 +343,21 @@ confidence. An earlier guess of 0.45 deferred **100%** of decisions — the rule
 were in the prompt and laya never got to use them.
 
 `CONF_FLOOR` is 0.013, which against the current distribution sits near the 20th
-percentile and defers roughly a fifth of decisions. It was derived from a
-previous version of the question and is now slightly conservative; re-derive it
-whenever the criteria text changes, since the distribution moves with it. The
-p95 of 1.000 is the capacity filter showing through — when only one bus has
-room, the model is not choosing, and the HUD counter is what makes that visible
-rather than an accident.
+percentile and defers roughly a fifth of decisions. The p95 of 1.000 is the capacity
+filter showing through — when only one bus has room, the model is not choosing, and
+the HUD counter is what makes that visible rather than an accident.
+
+**The floor is per-model, and this is the trap worth knowing about.** It is
+calibrated to laya's distribution (p50 0.033), which is compressed near zero by the
+checkpoint's own temperature. Jev reports p50 0.880 for the same question, so the
+same 0.013 defers nothing at all — selecting `jev` in the browser defers 0 of 27
+decisions, while laya defers about a fifth. Moving models means re-deriving this
+constant from that model's percentiles, and reusing a floor across models is not
+neutral: it silently disables the gate rather than mis-setting it.
 
 `act_probability` is reported but deliberately *not* gated on: measured at
-1.000 across every percentile here, so a floor on it would be dead code.
+1.000 across every percentile here, so a floor on it would be dead code. Jev does
+not return the field at all, which the `?? 1` in `askCJet` absorbs.
 
 #### Fine-tuning
 
@@ -298,10 +373,12 @@ gate above.
 
 The gate was: finetune only if the rules arm left regret materially above the
 floor on scenarios where the rule is clearly correct. It does not — regret falls
-19.25 → 3.37 blocks and the model follows the criteria 92% of the time. The
-remaining gap is not something the model fails to learn; it is the ~5% of
+38.33 → 6.43 blocks on laya and 35.18 → 1.54 on Jev, without touching a weight.
+The remaining gap is not something the model fails to learn; it is the ~5% of
 distance the routing objective can still give back, and a finetune would be
-paying 421M parameters of training to chase it.
+paying 421M parameters of training to chase it. The cross-model result is what
+settles this: if the technique were a property of the checkpoint rather than of
+System-1 models in general, Jev would not have improved 23× without training.
 
 ## IR 자료
 
@@ -327,22 +404,48 @@ paying 421M parameters of training to chase it.
 
 ### 측정된 결과
 
-**규칙이 모델에 도달하는가** (200개 시나리오 중 197개가 실제 충돌 케이스)
+**규칙이 모델에 도달하는가** (200개 시나리오 중 195개가 실제 충돌 케이스)
 
 | 지표 | 규칙 없음 | 규칙 반영 |
 |---|---|---|
-| 최소우회 regret | 13.38 블록 | **1.29 블록** |
-| 최소우회 버스 선택률 | 31.0% | **93.9%** |
+| 최소우회 regret | 38.33 블록 | **6.43 블록** |
+| 최소우회 버스 선택률 | 39.0% | **79.0%** |
+
+**모델이 바뀌어도 같은 결과인가** — laya(CJet)와 Jev(TypeSafe) 동일 인터페이스 대조
+
+| | 규칙 없음 | 규칙 반영 | 판단당 비용 | 지연 |
+|---|---|---|---|---|
+| **laya (CJet)** | 38.33 블록 | 6.43 블록 | $0 (로컬) | 136 ms |
+| **Jev** | 35.18 블록 | **1.54 블록** | $0.000032 | 269 ms |
+
+두 모델 모두 **규칙 없이는 쓸모가 없습니다** — laya의 no-rules(38.33)는 단순 최근접
+휴리스틱(34.60)보다 오히려 나쁩니다. 규칙을 넣으면 laya는 6배, Jev는 **23배**
+개선되고 1.54 블록까지 내려갑니다. 즉 이 기법은 laya의 `[MASK]` 구조 특유한
+것이 아니라 **System-1 모델 일반의 성질**입니다. IR 주장에서 가장 무게가 실리는
+부분이 이겁니다.
 
 **하드 제약(좌석)이 실제로 지켜지는가**
 
 | | 규칙 없음 | 규칙 반영 | 규칙 반영(필터 미적용) | 단순 최근접 |
 |---|---|---|---|---|
-| 좌석 초과 배정 | 10건 | **0건** | 2건 | 12건 |
+| laya 좌석 초과 배정 | 51건 | **0건** | 4건 | 48건 |
+| Jev 좌석 초과 배정 | 47건 | **0건** | **0건** | 48건 |
 
 좌석이 없는 버스를 **선택지에서 삭제**했기 때문에 위반이 0입니다. 규칙을
 "설명"한 것이 아니라 "제거"해서, 모델이 보지 못한 선택지를 고를 수 없게 한
 결과입니다.
+
+다만 **모델에 따라 필터의 가치가 다릅니다.** 필터 없이 criteria 문장만으로
+알려주면 laya는 4건 위반하지만 Jev는 **0건**입니다 — Jev는 "full, no room"을
+읽고 스스로 거절합니다. Tier 0는 읽는 능력이 약한 모델을 위해 규칙을
+"불가능하게" 만드는 장치이며, 잘 읽는 모델에게는 필터가 아무것도 보장하지
+않습니다(사실 Jev에서는 필터가 오히려 regret을 0.98 → 1.54로 조금 악화시킵니다).
+
+> **이전 수치는 정정되었습니다.** 위 "규칙 없음" 수치는 당초 `rules:` 키만 지우고
+> 다시 측정한 값이었고, 그 상태에는 우리 규칙이 다른 두 경로로 남아 있었습니다
+> (`recommendation` 문장에 `detourCost()`로 만든 문장이 포함됨). 깨끗하게 다시 만든
+> 기준선은 약 2배 나쁩니다(19.25 → 38.33). 규칙 arm는 그대로이므로 개선 폭이
+> 커져 보이지만, **새 결과가 아니라 이전 기준선의 오류가 수정된 것**입니다.
 
 **운영 방식이 바뀔 때** (시뮬레이션, 정책당 200초, 3시드)
 
@@ -357,25 +460,35 @@ multi-pickup off       133.0 / 40.2        127.3 / 39.9
 
 ### 해석: 이 실험에서 가장 값진 발견
 
-**AI가 못 한 것이 아니라, 운영 방식이 규칙을 받쳐주지 않았던 것입니다.**
+**1. AI가 못 한 것이 아니라, 운영 방식이 규칙을 받쳐주지 않았던 것입니다.**
 
 규칙 주입 직후 측정한 결과는 이렇았습니다 — 규칙은 모델에 잘 들어갔고
-우회로 regret이 10배 줄었는데, 실제 처리량은 오히려 **적었습니다**(76.0 vs 78.3).
+우회로 regret이 크게 줄었는데, 실제 처리량은 오히려 **적었습니다**(76.0 vs 78.3).
 원인은 AI가 아니라 **버스가 구조상 한 명씩만 태울 수 있었던 것**이었습니다. 곧,
 "도메인 규칙을 넣어라"가 아니라 **"그 규칙이 성립할 수 있는 운영 모델부터 갖춰라"**
 는 순서를 말합니다.
 
-이 순서를 뒤집으면 흔한 실패 모드(AI를 구매했으나 규칙이 반영되지 않아 ROI가
-안 나오고 원인을 모델 탓으로 돌리는 상황)를 설계 단계에서 피할 수 있습니다. 그리고
-이 저장소는 **검증 수치와 검증 도구를 함께 제공**합니다 — 주장과 반증 조건이
-저장소에 들어 있습니다.
+**2. 기법은 특정 모델의 구조가 아니라 System-1 모델 일반의 성질입니다.**
+
+동일 인터페이스를 가진 다른 System-1 모델(Jev)로 반사실 A/B를 돌렸을 때,
+Jev는 규칙 없이는 laya와 마찬가지로 쓸모없었고(35.18 vs laya 38.33, 둘 다 단순
+최근접 34.60 수준), 규칙 주입 시 **23배** 개선되며 1.54 블록까지 내려갔습니다.
+laya의 `[MASK]` 스코어러 구조에 특화된 트릭이었다면 Jev에서는 작동하지 않아야
+했습니다. 즉 특정 벤더 선택이 아니라 **방법론**을 사는 것이고, 모델 교체 시
+기존 주입 코드가 그대로 유지됩니다.
 
 ### 조건과 비용
 
-- 모델 크기·지연: 421M 파라미터, 판단당 ~150ms (기준 입력 대비 +40ms)
+- 모델 크기·지연: 421M 파라미터, 판단당 ~150ms (기준 입력 대비 +40ms).
+  비교 대상 Jev는 269ms, 판단당 $0.000032 (판단 200회 ≈ 0.6센트)
 - 학습 비용 0: 파인튜닝 미수행. 규칙 반영만으로 판단이 바뀌며, 파인튜닝 시
   calibration이 손상되어 신뢰도 게이트가 무력화될 위험이 있음
 - 재현성: 시뮬레이션이 시드 고정·결정론적이며, 같은 시나리오에서 동일 재현
+- **모델 교체 시 신뢰도 게이트는 재파생해야 합니다.** laya의 신뢰도는
+  p50 0.033, Jev는 같은 질문에 p50 0.880입니다. laya에 맞춰 잡은 임계값
+  (0.013)을 그대로 쓰면 Jev에서는 **무효**가 되어 27건 중 0건만 게이트됩니다.
+  임계값은 모델별 상수이고, 모델을 바꾸면 재측정 없이 그대로 두면 게이트가
+  조용히 꺼집니다.
 
 ### 한계 — 주장 범위를 넘어서는 부분
 
@@ -385,8 +498,13 @@ multi-pickup off       133.0 / 40.2        127.3 / 39.9
   다중 탑승의 +43%는 AI 기여가 아니라 **운영 방식 변경의 효과**입니다. 두 값을
   혼동하지 않는 것이 중요합니다.
 - 강제 제약(좌석)이 있는 문제는 코드로 처리했습니다. 프롬프트에 "이러면 안 된다"고
-  쓰는 것으로는 보장되지 않기 때문입니다. 자연어로 표현되는 **선호**(soft
-  preference)만 모델에 맡기는 경계가 명확하지 않은 영역은 남아 있습니다.
+  쓰는 것으로는 보장되지 않기 때문입니다. 다만 **모델이criteria를 제대로 읽으면
+  필터 없이도 0건**이었습니다(Jev). 즉 코드로 제거하는 것은 "안전한 기본값"이지
+  유일한 방법은 아닙니다. 자연어로 표현되는 **선호**(soft preference)만 모델에
+  맡기는 경계가 명확하지 않은 영역은 남아 있습니다.
+- **Jev 비교는 단일 스냅샷(1.13-20260917) 1개입니다.** 버전 간 차이가 이번
+  격차에 기여했는지 알 수 없습니다. 시나리오·판정 코드는 동일하나 200회 1회
+  실행이므로 seed 재현성은 있으나 통계적 표본은 아닙니다.
 - 규모 검증 없음: 버스 3대, 격자 50×50, 421M 모델 기준. 파라미터 스케일업과
   동시 에이전트 수 증가에 대한 검증은 없습니다.
 
@@ -394,8 +512,10 @@ multi-pickup off       133.0 / 40.2        127.3 / 39.9
 
 1. 실제 운영 데이터로 동일 프로토콜(반사실 A/B + closed loop) 재실행
 2. 파인튜닝 게이트: 규칙 반영 후 regret이 기준선을 크게 넘을 때만 재고려 (현재
-   19.25 → 3.42로 통과하지 않음 → **파인튜닝하지 않음**)
+   38.33 → 6.43으로 통과하지 않음 → **파인튜닝하지 않음**)
 3. 언어 분기: 현재 영어 체크포인트 기준이며, 다국어 입력에서의 규칙 유효성 미검증
+4. 모델 3종 이상으로 확대: 현 결론은 2개 모델(421M 로컬 / 원격 API)이며,
+   Jev 스냅샷 변경 후 재측정
 
 ## Sensor anomaly detection
 

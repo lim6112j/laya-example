@@ -407,6 +407,55 @@ export function rulesText(sim) {
     `not the nearest one.`;
 }
 
+/**
+ * The rule-free baseline state, for the model comparison.
+ *
+ * This is NOT `buildState()` with the `rules` key deleted. Two more channels leak the
+ * rule into that: `buildState().recommendation` ends with a sentence built from
+ * `detourCost()` and `isOnRoute()` — which *is* the rule — and `buildState().fleet` is
+ * `busText()`, which reports seats and multi-stop plans and so presupposes the world the
+ * rule describes. Stripping only the key leaves a "no rules" arm that was quietly a rules
+ * arm, which is exactly the kind of contaminated baseline that flatters the thing being
+ * measured.
+ *
+ * So this is a separate builder: the world as plain description, plus a nearest-bus
+ * recommendation, and nothing derived from the rule.
+ */
+export function buildBaselineState(sim, passenger) {
+  const ranked = rankedByNearest(sim, passenger);
+  const [best, second] = ranked;
+  const anyFeasible = sim.buses.some(bus => feasible(bus, passenger, sim));
+  return {
+    demand: `A new passenger request arrived at ${cellText(passenger.pickup)} and wants to go to ` +
+      `${cellText(passenger.dest)}, a ${manhattan(passenger.pickup, passenger.dest)}-block ride.`,
+    // position, what the bus is doing right now, and how much is waiting on it.
+    // No seat counts, no "+4 stops", no detour language.
+    fleet: ranked.map(bus => plainBusText(bus)).join(" "),
+    recommendation: anyFeasible
+      ? `${best.label} is nearest: ${Math.round(nearestCost(best, passenger))} blocks away ` +
+        `(straight line); ${second.label} would need ` +
+        `${Math.round(nearestCost(second, passenger))} blocks. ` +
+        `You may follow the nearest bus or override it if the situation warrants.`
+      : `No bus has room for this demand right now, so it has to wait.`,
+    backlog: `${sim.passengers.filter(p => p.state === "waiting").length} passengers waiting, ` +
+      `${sim.deliveredCount} delivered so far`,
+  };
+}
+
+/** A bus described without any of the multi-pickup framing. */
+function plainBusText(bus) {
+  const at = `at ${cellText({ x: Math.round(bus.x), y: Math.round(bus.y) })}`;
+  const next = bus.stops[0];
+  if (!next) {
+    return bus.queue.length
+      ? `${bus.label} is idle, ${at}, with ${bus.queue.length} waiting.`
+      : `${bus.label} is idle, ${at}, with nothing waiting.`;
+  }
+  const what = next.kind === "pickup" ? "heading to a pickup" : "carrying a passenger to a drop-off";
+  const queued = bus.queue.length ? `, ${bus.queue.length} more waiting behind it` : "";
+  return `${bus.label} is ${what}, ${at}${queued}.`;
+}
+
 /** The state. `rules` first, for the truncation reason above. */
 export function buildState(sim, passenger) {
   const ranked = rankedByNearest(sim, passenger);

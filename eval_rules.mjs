@@ -17,8 +17,8 @@
 // rule reaches the model, the loop asks whether the world is one the rule helps.
 
 import {
-  createSim, step, assignTo, buildState, buildQuestion, buildBaselineQuestion,
-  detourCost, nearestCost, feasible, rankedByNearest, headEstimate,
+  createSim, step, assignTo, buildState, buildBaselineState, buildQuestion,
+  buildBaselineQuestion, detourCost, nearestCost, feasible, rankedByNearest, headEstimate,
 } from "./static/fleet_sim.js";
 
 function parseArgs(argv) {
@@ -36,7 +36,8 @@ const args = parseArgs(process.argv.slice(2));
 const N = Number(args.n ?? 200);
 const SEED = Number(args.seed ?? 7);
 const ENDPOINT = args.url ?? "http://localhost:8000/api/predict";
-const MODEL = args.model ?? "auto";
+// Reassigned per model by runCounterfactual() when --compare is used.
+let MODEL = args.model ?? "auto";
 const WARMUP = Number(args.warmup ?? 5);
 const DEMAND_EVERY = Number(args.demand ?? 1.0);
 
@@ -86,11 +87,11 @@ const simOf = sc => ({ buses: sc.buses, passengers: [], deliveredCount: sc.deliv
 /**
  * `rules`          — per-option derived numbers, infeasible buses omitted (Tier 0 + 1)
  * `rules-nofilter` — same numbers, but every bus is offered (measures Tier 0 alone)
- * `no-rules`       — the original static question
+ * `no-rules`       — the rule-free state and the original static question
  */
 const ARMS = {
   "no-rules": sc => ({
-    state: stripRules(buildState(simOf(sc), sc.passenger)),
+    state: buildBaselineState(simOf(sc), sc.passenger),
     question: buildBaselineQuestion(),
   }),
   "rules": sc => ({
@@ -107,12 +108,6 @@ const ARMS = {
     return { state: buildState(s, sc.passenger), question: q };
   },
 };
-
-/** The no-rules arm keeps the original state, which had no `rules` key. */
-function stripRules(state) {
-  const { rules, ...rest } = state;
-  return rest;
-}
 
 // ---- scoring -----------------------------------------------------------------
 
@@ -149,7 +144,10 @@ async function ask(arm, sc) {
   const a = body.result.answers.assign;
   return { choice: a.choice, confidence: a.confidence ?? 0,
            act: (a.action || {}).act_probability ?? 1,
-           latency: body.latency_ms, head: headEstimate(question) };
+           latency: body.latency_ms, head: headEstimate(question),
+           // Jev reports what the call cost; laya returns nothing because it runs
+           // locally, so absent means $0 marginal — not "unknown".
+           cost: body.result.cost_usd ?? 0 };
 }
 
 // ---- counterfactual ----------------------------------------------------------
@@ -157,100 +155,142 @@ async function ask(arm, sc) {
 const MODE = args.mode ?? "multi";
 const multi = MODE !== "serial";
 const scenarios = generateScenarios(N, SEED, multi);
-console.error(`generated ${scenarios.length} ${MODE}-mode scenarios from seed ${SEED}`);
-console.error(`warming up (${WARMUP} calls, the first one pays the checkpoint load)…`);
-for (let i = 0; i < WARMUP; i++) await ask("rules", scenarios[0]);
-
-const results = {};
-for (const arm of Object.keys(ARMS)) {
-  const rows = [];
-  for (const sc of scenarios) {
-    let r;
-    try {
-      r = await ask(arm, sc);
-    } catch (err) {
-      console.error(`\nFAILED on arm ${arm}: ${err.message}`);
-      process.exit(1);
-    }
-    const bus = sc.buses.find(b => `bus_${b.id.toLowerCase()}` === r.choice);
-    if (!bus) { console.error(`unknown choice ${r.choice}`); process.exit(1); }
-    const { detour, near } = bests(sc);
-    const got = detourCost(bus, sc.passenger, sc);
-    const gotNear = nearestCost(bus, sc.passenger);
-    rows.push({
-      detourRegret: got - detour,
-      nearRegret: gotNear - near,
-      pickedMinDetour: Math.abs(got - detour) < 1e-6,
-      pickedNearest: Math.abs(gotNear - near) < 1e-6,
-      violatedCapacity: !feasible(bus, sc.passenger, sc),
-      confidence: r.confidence,
-      act: r.act,
-      latency: r.latency,
-      head: r.head,
-      // is there a real conflict? if nearest == least-detour the rule changes nothing
-      tensionful: Math.abs(detour - near) > 0.5,
-    });
-  }
-  results[arm] = rows;
-  process.stderr.write(`${arm}: done\n`);
-}
-
-// The nearest-bus dispatcher, scored with no model at all. Note it does not check
-// feasibility — that is the point of the naive baseline, and it is why its
-// "nearest regret" can go negative: it is measured against an optimum restricted to
-// buses that can actually take the work.
-results.greedy = scenarios.map(sc => {
-  const s = simOf(sc);
-  const { detour, near } = bests(sc);
-  const b = rankedByNearest(s, sc.passenger)[0];
-  const got = detourCost(b, sc.passenger, s);
-  return {
-    detourRegret: got - detour,
-    nearRegret: nearestCost(b, sc.passenger) - near,
-    pickedMinDetour: Math.abs(got - detour) < 1e-6,
-    pickedNearest: Math.abs(nearestCost(b, sc.passenger) - near) < 1e-6,
-    violatedCapacity: !feasible(b, sc.passenger, s),
-    tensionful: Math.abs(detour - near) > 0.5,
-  };
-});
-
-// ---- report ------------------------------------------------------------------
 
 const mean = xs => xs.reduce((a, b) => a + b, 0) / (xs.length || 1);
 const pct = x => `${(100 * x).toFixed(1)}%`;
 const pick = (rows, k) => mean(rows.map(r => r[k]));
 
 const arms = ["no-rules", "rules", "rules-nofilter", "greedy"];
-const tension = results["rules"].filter(r => r.tensionful);
 
-console.log(`\n${scenarios.length} scenarios (seed ${SEED}, ${MODE} mode), ` +
-            `${tension.length} with a real nearest-vs-least-detour conflict\n`);
-const w = 22;
-console.log("".padEnd(w) + arms.map(a => a.padStart(16)).join(""));
-console.log("-".repeat(w + 16 * arms.length));
-for (const [label, fn] of [
-  ["mean detour regret", a => pick(results[a], "detourRegret").toFixed(2) + " blk"],
-  ["mean nearest regret", a => pick(results[a], "nearRegret").toFixed(2) + " blk"],
-  ["picks least-detour", a => pct(mean(results[a].map(r => r.pickedMinDetour)))],
-  ["picks nearest", a => pct(mean(results[a].map(r => r.pickedNearest)))],
-  ["capacity violations", a => String(results[a].filter(r => r.violatedCapacity).length)],
-  ["mean confidence", a => mean(results[a].map(r => r.confidence ?? 0)).toFixed(3)],
-  ["ms", a => results[a].some(r => r.latency) ? mean(results[a].map(r => r.latency)).toFixed(0) : "—"],
-  ["head tokens (est)", a => results[a].some(r => r.head) ? String(Math.max(...results[a].map(r => r.head))) : "—"],
-]) {
-  console.log(label.padEnd(w) + arms.map(a => String(fn(a)).padStart(16)).join(""));
-}
+/** Run every arm against one model, print its table, and return the rows. */
+async function runCounterfactual(model) {
+  MODEL = model;
+  console.error(`\n[${model}] ${scenarios.length} ${MODE}-mode scenarios, seed ${SEED}`);
+  console.error(`[${model}] warming up (${WARMUP} calls)…`);
+  for (let i = 0; i < WARMUP; i++) await ask("rules", scenarios[0]);
 
-if (tension.length) {
-  console.log(`\nRestricted to the ${tension.length} conflicting scenarios:\n`);
+  const results = {};
+  for (const arm of Object.keys(ARMS)) {
+    const rows = [];
+    for (const sc of scenarios) {
+      let r;
+      try {
+        r = await ask(arm, sc);
+      } catch (err) {
+        console.error(`\nFAILED on arm ${arm} (${model}): ${err.message}`);
+        process.exit(1);
+      }
+      const bus = sc.buses.find(b => `bus_${b.id.toLowerCase()}` === r.choice);
+      if (!bus) { console.error(`unknown choice ${r.choice}`); process.exit(1); }
+      const { detour, near } = bests(sc);
+      const got = detourCost(bus, sc.passenger, sc);
+      const gotNear = nearestCost(bus, sc.passenger);
+      rows.push({
+        detourRegret: got - detour,
+        nearRegret: gotNear - near,
+        pickedMinDetour: Math.abs(got - detour) < 1e-6,
+        pickedNearest: Math.abs(gotNear - near) < 1e-6,
+        violatedCapacity: !feasible(bus, sc.passenger, sc),
+        confidence: r.confidence,
+        act: r.act,
+        latency: r.latency,
+        head: r.head,
+        cost: r.cost,
+        // is there a real conflict? if nearest == least-detour the rule changes nothing
+        tensionful: Math.abs(detour - near) > 0.5,
+      });
+    }
+    results[arm] = rows;
+    process.stderr.write(`[${model}] ${arm}: done\n`);
+  }
+
+  // The nearest-bus dispatcher, scored with no model at all. Note it does not check
+  // feasibility — that is the point of the naive baseline, and it is why its
+  // "nearest regret" can go negative: it is measured against an optimum restricted to
+  // buses that can actually take the work.
+  results.greedy = scenarios.map(sc => {
+    const s = simOf(sc);
+    const { detour, near } = bests(sc);
+    const b = rankedByNearest(s, sc.passenger)[0];
+    const got = detourCost(b, sc.passenger, s);
+    return {
+      detourRegret: got - detour,
+      nearRegret: nearestCost(b, sc.passenger) - near,
+      pickedMinDetour: Math.abs(got - detour) < 1e-6,
+      pickedNearest: Math.abs(nearestCost(b, sc.passenger) - near) < 1e-6,
+      violatedCapacity: !feasible(b, sc.passenger, s),
+      tensionful: Math.abs(detour - near) > 0.5,
+    };
+  });
+
+  const tension = results["rules"].filter(r => r.tensionful);
+  console.log(`\n=== model: ${model} ===`);
+  console.log(`${scenarios.length} scenarios (seed ${SEED}, ${MODE} mode), ` +
+              `${tension.length} with a real nearest-vs-least-detour conflict\n`);
+  const w = 22;
   console.log("".padEnd(w) + arms.map(a => a.padStart(16)).join(""));
   console.log("-".repeat(w + 16 * arms.length));
   for (const [label, fn] of [
-    ["mean detour regret", a => pick(results[a].filter(r => r.tensionful), "detourRegret").toFixed(2) + " blk"],
-    ["picks least-detour", a => pct(mean(results[a].filter(r => r.tensionful).map(r => r.pickedMinDetour)))],
+    ["mean detour regret", a => pick(results[a], "detourRegret").toFixed(2) + " blk"],
+    ["mean nearest regret", a => pick(results[a], "nearRegret").toFixed(2) + " blk"],
+    ["picks least-detour", a => pct(mean(results[a].map(r => r.pickedMinDetour)))],
+    ["picks nearest", a => pct(mean(results[a].map(r => r.pickedNearest)))],
+    ["capacity violations", a => String(results[a].filter(r => r.violatedCapacity).length)],
+    ["mean confidence", a => mean(results[a].map(r => r.confidence ?? 0)).toFixed(3)],
+    ["ms", a => results[a].some(r => r.latency) ? mean(results[a].map(r => r.latency)).toFixed(0) : "—"],
+    ["$ / decision", a => {
+      const any = results[a].some(r => r.cost);
+      return any ? `$${mean(results[a].map(r => r.cost)).toFixed(6)}` : "$0 local";
+    }],
+    ["head tokens (est)", a => results[a].some(r => r.head) ? String(Math.max(...results[a].map(r => r.head))) : "—"],
   ]) {
     console.log(label.padEnd(w) + arms.map(a => String(fn(a)).padStart(16)).join(""));
   }
+
+  if (tension.length) {
+    console.log(`\nRestricted to the ${tension.length} conflicting scenarios:\n`);
+    console.log("".padEnd(w) + arms.map(a => a.padStart(16)).join(""));
+    console.log("-".repeat(w + 16 * arms.length));
+    for (const [label, fn] of [
+      ["mean detour regret", a => pick(results[a].filter(r => r.tensionful), "detourRegret").toFixed(2) + " blk"],
+      ["picks least-detour", a => pct(mean(results[a].filter(r => r.tensionful).map(r => r.pickedMinDetour)))],
+    ]) {
+      console.log(label.padEnd(w) + arms.map(a => String(fn(a)).padStart(16)).join(""));
+    }
+  }
+
+  console.log(`\nconfidence (rules arm): ${percentiles(results["rules"], "confidence")}`);
+  console.log(`act_probability      : ${percentiles(results["rules"], "act")}`);
+  return results;
+}
+
+const MODELS = args.compare
+  ? String(args.models ?? "english,jev").split(",").map(s => s.trim())
+  : [MODEL];
+const byModel = {};
+for (const m of MODELS) byModel[m] = await runCounterfactual(m);
+
+if (MODELS.length > 1) {
+  console.log(`\n\n=== head to head: does criteria injection transfer across models? ===\n`);
+  const w = 26;
+  const head = ["model", "arm", "detour regret", "least-detour", "capacity viol.", "$ / decision"];
+  console.log("".padEnd(w) + head.slice(1).map(h => h.padStart(20)).join(""));
+  console.log("-".repeat(w + 20 * (head.length - 1)));
+  for (const m of MODELS) {
+    for (const arm of ["no-rules", "rules"]) {
+      const r = byModel[m][arm];
+      const cost = r.some(x => x.cost) ? `$${mean(r.map(x => x.cost)).toFixed(6)}` : "$0 local";
+      console.log((`${m} / ${arm}`).padEnd(w) + [
+        pick(r, "detourRegret").toFixed(2) + " blk",
+        pct(mean(r.map(x => x.pickedMinDetour))),
+        String(r.filter(x => x.violatedCapacity).length),
+        cost,
+      ].map(s => String(s).padStart(20)).join(""));
+    }
+  }
+  console.log(`\nThe two arms differ only in what is put in the prompt: the same scenarios,`);
+  console.log(`the same scoring, the same two models. A drop from no-rules to rules in both`);
+  console.log(`rows means the technique is a property of System-1 models, not of laya alone.`);
 }
 
 function percentiles(rows, key) {
@@ -259,8 +299,6 @@ function percentiles(rows, key) {
   const q = p => xs[Math.floor(p * (xs.length - 1))];
   return [0.10, 0.50, 0.95].map(p => `p${(p * 100).toFixed(0)} ${q(p).toFixed(3)}`).join("  ");
 }
-console.log(`\nconfidence (rules arm): ${percentiles(results["rules"], "confidence")}`);
-console.log(`act_probability      : ${percentiles(results["rules"], "act")}`);
 
 // ---- closed loop -------------------------------------------------------------
 
@@ -297,10 +335,14 @@ async function closedLoop(policy, seed, mPickup, seconds = 200) {
            blocks: sim.blocksDriven };
 }
 
-if (args.closed !== false) {
+// The closed loop answers a different question from the counterfactual (does the rule
+// pay off end to end), and it costs one API call per decision — at ~1s for Jev a 200s
+// loop is many minutes and doubles the spend. So it runs on a single model only.
+if (args.closed !== false && MODELS.length === 1) {
   const policies = ["rules", "greedy"];
-  console.log(`\nClosed loop, ${args.loopsecs ?? 200}s per policy, one demand every ` +
-              `${DEMAND_EVERY}s, 3 seeds each.\nCells are "delivered / blocks per demand":\n`);
+  console.log(`\nClosed loop on model "${MODEL}", ${args.loopsecs ?? 200}s per policy, ` +
+              `one demand every ${DEMAND_EVERY}s, 3 seeds each.\n` +
+              `Cells are "delivered / blocks per demand":\n`);
   const w2 = 20;
   console.log("".padEnd(w2) + policies.map(p => p.padStart(22)).join(""));
   console.log("-".repeat(w2 + 22 * policies.length));

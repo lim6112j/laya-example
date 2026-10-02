@@ -204,6 +204,7 @@ import {
   createSim, step as stepSim, newDemand, assignTo as assignToSim,
   buildState, buildQuestion,
   rankedByNearest, greedyAssign, cellText, manhattan, busPos, plannedPath, RULES,
+  feasible, detourCost,
 } from "/fleet_sim.js";
 import { canServe as ontologyCanServe } from "/ontology.js";
 import { mountOntologyPanel } from "/ontology_panel.js";
@@ -255,7 +256,8 @@ async function dispatch(passenger) {
       if (bus && place(bus, passenger)) return;
       // CJet failed or deferred -> keep the fleet running with the heuristic
     }
-    place(greedyAssign(sim, passenger), passenger);
+    place(greedyAssign(sim, passenger), passenger) ||
+    place(anyFeasibleBus(passenger), passenger);
   } finally {
     passenger.dispatching = false;
   }
@@ -272,6 +274,20 @@ async function dispatch(passenger) {
  * cumulative tally that never fell, and retryWaiting() calls place() for every waiting
  * passenger twice a second, so one passenger stuck for ten seconds added twenty.
  */
+/**
+ * The cheapest bus that can actually take this demand, or null if none can.
+ *
+ * `greedyAssign` is the nearest bus, and it does not check capacity — measured over
+ * 9000 placements it lands on a full bus while a free one exists 34% of the time. Those
+ * passengers were being flagged as having no room when a seat was available, and left
+ * waiting for a retry that would have had the same 34% chance of happening again.
+ */
+function anyFeasibleBus(passenger) {
+  const ok = sim.buses.filter(bus => feasible(bus, passenger, sim));
+  if (!ok.length) return null;
+  return [...ok].sort((a, b) => detourCost(a, passenger, sim) - detourCost(b, passenger, sim))[0];
+}
+
 function place(bus, passenger) {
   if (assignToSim(sim, bus, passenger)) {
     passenger.noRoom = false;
@@ -296,9 +312,10 @@ async function retryWaiting() {
     for (const p of waiting) {
       if (document.getElementById("autoplay").checked) {
         const bus = await askCJet(p, true);
-        if (bus) { if (place(bus, p)) return; continue; }
+        if (bus && place(bus, p)) return;
       }
-      place(greedyAssign(sim, p), p);
+      if (place(greedyAssign(sim, p), p)) continue;
+      place(anyFeasibleBus(p), p);
     }
   } finally {
     retryBusy = false;

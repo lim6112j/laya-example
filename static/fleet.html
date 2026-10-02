@@ -132,7 +132,7 @@
         <span>Riding <strong id="riding">0</strong></span>
         <span>Delivered <strong id="delivered">0</strong></span>
         <span>Demands <strong id="demands">0</strong></span>
-        <span title="demands waiting right now because no bus had a free seat">No room <strong id="backlog">0</strong></span>
+        <span title="demands waiting right now because every bus is at its planning horizon (2 × seats stops) — the seat limit is not what binds here">Over-committed <strong id="backlog">0</strong></span>
         <span class="badge" id="autoplayBadge">CJET IS DISPATCHING</span>
       </div>
       <div class="hud">
@@ -290,17 +290,24 @@ function anyFeasibleBus(passenger) {
 
 function place(bus, passenger) {
   if (assignToSim(sim, bus, passenger)) {
-    passenger.noRoom = false;
+    passenger.overCommitted = false;
     updateChips();
     return true;
   }
-  passenger.noRoom = true;   // waiting because no bus had a seat for it
+  passenger.overCommitted = true;   // every bus was already at its planning horizon
   return false;
 }
 
-/** How many demands are waiting right now purely because no bus had room. */
-function noRoomCount() {
-  return sim.passengers.filter(p => p.state === "waiting" && p.noRoom).length;
+/**
+ * How many demands are waiting right now because every bus is over-committed.
+ *
+ * Not "no room" in the seat sense. Measured over 17k refused placements, the seat limit
+ * was never the sole cause: `insertStops` returns null on the planning horizon before the
+ * seat predicate — hand-written or ontology — is ever consulted. A bus with three free
+ * seats will still refuse, because it has already committed its route.
+ */
+function overCommittedCount() {
+  return sim.passengers.filter(p => p.state === "waiting" && p.overCommitted).length;
 }
 
 /** Try again for anything still waiting — a seat may have freed since it arrived. */
@@ -492,7 +499,7 @@ function updateHud() {
   document.getElementById("delivered").textContent = sim.deliveredCount;
   document.getElementById("demands").textContent = sim.demandCount;
   const backlog = document.getElementById("backlog");
-  if (backlog) backlog.textContent = noRoomCount();
+  if (backlog) backlog.textContent = overCommittedCount();
 }
 
 // ---- rendering ---------------------------------------------------------------
@@ -691,7 +698,7 @@ window.__fleetState = () => ({
   riding: sim.passengers.filter(p => p.state === "riding").length,
   delivered: sim.deliveredCount, demands: sim.demandCount,
   blocksDriven: Math.round(sim.blocksDriven), multiPickup: sim.config.multiPickup,
-  decided, deferred, noRoom: noRoomCount(),
+  decided, deferred, overCommitted: overCommittedCount(),
 });
 </script>
 </body>

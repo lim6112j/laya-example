@@ -3,14 +3,35 @@ name = "laya-example"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "laya>=0.3.5",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
+    # Intel Mac (x86_64) support. PyTorch stopped publishing macOS x86_64 wheels after
+    # 2.2.2, so 2.2.2 is the newest torch installable here. That version forces two
+    # downstream caps. Each is marked on platform_machine so Apple Silicon, where
+    # torch 2.14 is available, keeps resolving to current versions:
+    #   - numpy<2: torch 2.2.2 is built against the numpy 1.x C ABI. numpy 2.x fails
+    #     with "_ARRAY_API not found" and makes tensor.numpy() raise.
+    #   - transformers<5: transformers 5.x requires torch>=2.5 and silently disables
+    #     PyTorch when it is older, leaving `nn` undefined in transformers' own
+    #     integrations/accelerate.py ("NameError: name 'nn' is not defined").
+    # Python must also be 3.11: transformers' ModernBERT module uses @torch.compile,
+    # and torch 2.2.2's Dynamo refuses Python 3.12+ ("Dynamo is not supported on
+    # Python 3.12+"). Hence the requires-python upper bound above.
+    "torch==2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torch>=2.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "numpy<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numpy>=2; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "transformers<5; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "transformers>=5; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8",
+    # starlette's TestClient (used by test_server.py) requires an HTTP client package
+    # that starlette does not pull in on its own.
+    "httpx2>=0.1",
 ]

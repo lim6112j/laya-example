@@ -94,6 +94,14 @@ probability bars, confidence and latency ("Laya's decision"). Toggle autoplay
 off to play by arrow keys and compare; sliders tune the decision interval and
 ball speed, and the model override selects the checkpoint.
 
+It also carries an **Ontology** panel — the same TBox editor and ABox view as the
+fleet demo — declaring one rule: `Ball ⊑ ≥1 catchableBy`, so a ball the physics
+cannot recover is a fact rather than a mistake. Off by default. The two counters
+under the canvas split the loss into *provably lost* and *lost after a catchable
+ask*, which is the honest form of "the demo stops blaming the model for
+physics-impossible catches". See
+[The same idea in Breakout](#the-same-idea-in-breakout--and-where-the-fleet-invariant-does-not-carry-over).
+
 ### laya runs the warehouse
 
 `static/warehouse.html` (linked from the UI header) simulates a cargo house
@@ -526,6 +534,125 @@ What it adds is that the rule is *declared*, so it can be contradicted
 compared against the code it replaces. A hand-written `if` cannot be wrong in any
 way you can detect. The tradeoff only starts paying if rules multiply far enough
 to interfere with each other — and this demo is not there yet.
+
+#### The same idea in Breakout — and where the fleet invariant does *not* carry over
+
+`static/breakout.html` now carries an Ontology panel too, with the same TBox editor, ABox
+view and enforce checkbox. The **TBox is data, but the reasoner is code** and the axiom
+**ids are hardcoded** — so is the "Tier 1 arrives as an injected extension" split. What is
+new is the constraint: reachability.
+
+`Ball ⊑ ≥1 catchableBy`. A descending ball below the brick field that no `left/stay/right`
+reaches is a violation, not a wrong answer. The verdict is computed by forward-simulating
+the physics (`rolloutReachable` in `breakout_sim.js`) and injected as an extension, exactly
+as fleet injects `detour` — cost is not logic.
+
+**Why not the obvious arithmetic.** "time to paddle × paddle speed ≥ gap" is what you would
+write, and it is wrong. Four closed forms were measured against the rollout over 40,000
+states; the best agreed **83%** of the time and every residual error ran the same way —
+declaring balls uncatchable that the physics catches. That is precisely the failure this
+feature exists to fix, because it would exculpate the model on balls it genuinely lost. The
+rollout costs **~9 µs typical, ~81 µs worst case** against a decision every 150–500 ms.
+
+**A bug the tests caught, worth recording.** The rollout first ran for a fixed 2.5 s. The
+brute-force sweep found **1136 of 21000** balls declared unreachable that the physics
+caught — every one a slow ball. A paddle bounce can leave the ball descending at ~50 px/s,
+and the ~210 px to the paddle then takes over 4 seconds. The horizon is now derived from
+`ball.vy` rather than fixed. That number is the reason the sweep forward-simulates the *real*
+`step()` rather than re-deriving the same algebra twice.
+
+```
+21000 states compared against the real step(), 0 false positives, 22 false negatives
+```
+
+**The invariant had to be restated, because the fleet one is false here.** Fleet's is
+*"turning it on should not change any decision — if it does, that is a bug."* That holds
+there by construction: the ontology filters an option set a caller already assembled. In
+breakout it **cannot** hold. Once the ball is provably gone, `left/stay/right` has no correct
+answer, so the option set *is* the question — gating it necessarily changes what is asked.
+Claiming otherwise would be false. What replaces it:
+
+> **Clause 1 — equivalence (inherited).** The reasoner's feasibility answer and the
+> hand-written arithmetic agree wherever both apply.
+>
+> **Clause 2 — soundness of the gate (new).** Enforcement must never suppress a question
+> whose answer could have changed the outcome. A false "unreachable" is the costly error; a
+> false "catchable" merely wastes one ask. `CATCH_TOL_PX` is therefore non-negative by
+> construction and asserted as such, so it cannot be "tidied" negative later.
+
+Clause 2 is the one the 21,000-state sweep enforces, and it is one-directional on purpose.
+Enforce **defaults to off**, so the demo ships byte-identical to before.
+
+**Above the bricks the ontology is silent.** A descending ball above `y = 121` can be
+deflected before it reaches the paddle, so no sound verdict exists. The decidable band is
+`ball.y ∈ (121, 331)`; outside it the panel renders "no verdict", never a violation. A
+verdict is about the geometry *at that tick*, but below the brick field no new information
+can change the trajectory — a ball declared unreachable stays unreachable.
+
+**What it does not do.** It does not improve the score, and the HUD says so with two
+counters that move independently of the toggle:
+
+```
+provably lost 0 · lost after a catchable ask 1
+```
+
+The second is the model's real failure rate. Splitting the first out is the honest
+presentation of "the demo stops blaming the model for physics-impossible catches" — it is a
+*different quantity*, not a better one.
+
+**`node eval_breakout.mjs` is the on/off A/B.** `ontology-off` is the demo exactly as it was;
+`ontology-on` is the same game with the gate closed. It reports what actually changes, and
+deliberately does not report score as the headline:
+
+```
+600 decision ticks sampled (seed 11, 0.25s cadence)
+  ontology-off: 600 asked · ontology-on: 560 asked, 40 suppressed (6.7%)
+  suppressed but actually catchable : 0   <- must be 0; this is clause 2
+  asked but hopeless                : 0
+  closed form disagrees with the rollout on 12.8% of states
+```
+
+The suppression rate is genuinely low, and that is a fact about the game rather than a
+defect in the gate: the paddle crosses at 200 px/s while the ball falls the ~210 px in
+1.1–3 s, so it recovers from most bad positions before the ball escapes. Hopeless balls need
+the paddle already committed the wrong way. Measured across seeds 3/7/11 the rate runs
+1.7%–6.7%.
+
+Two measurement traps this harness hit and now guards against in its own comments, because
+both produced a clean sheet of zeros that meant nothing: generating scenarios with a
+**perfect** paddle (every ball trivially catchable, nothing to suppress), and an aim bias too
+small to matter (unreachable rate 0.0% below ~60 px of bias).
+
+**The observation changed too, and it was wrong before.** `buildState()` compared the
+paddle to the ball's *current* x. The ball drifts and reflects on the way down, so over
+80,000 decidable states that named the wrong side **12.4%** of the time. It now reports the
+landing point, which takes that to **0** by construction, and both the prose and the reasoner
+read the same `measure()` so the number the model sees and the number reasoned over cannot
+diverge. Worth being straight about what that did and did not buy: it did **not** change the
+score — 25 seeded games with a perfect controller lost 1025 balls aiming at current x and
+1025 aiming at the landing point. A paddle driving toward the landing point sweeps through
+the current x on the way. The gain is that the model is no longer *told* the wrong thing,
+which starts to matter the moment a controller commits to one side for a whole descent.
+
+**Two modules, one shared core.** `breakout_ontology.js` is separate from `ontology.js`
+rather than a generalisation of it: the fleet reasoner has three hardcoded axiom ids the
+README names as a deliberate coupling, and parameterising them is a rewrite of the thing
+`test_ontology.mjs` protects. What was genuinely shared — `checkTBox`, `describeAxiom`,
+`addAxiom`, `removeAxiom`, `resetTBox`, and the editor itself — moved to
+`static/ontology_core.js` as `mountTBoxEditor({ root, adapter })`. `ontology.js` re-exports
+the moved names, so `test_ontology.mjs` and `eval_rules.mjs` are untouched and still pass.
+
+**`IMPLEMENTED_FORMS` deliberately did not move.** Both domains happen to implement the same
+four forms, so a shared list is the obvious tidy-up and it would re-open the hole commit
+`a5149d0` closed: a form fleet's `reason()` handles would pass breakout's `checkTBox` and then
+be enforced by nothing. Each domain exports its own, and `checkTBox` takes it as an argument.
+
+**Browser verification.** The panel was checked in headless Chromium, not just in node: panel
+mounts with 5 axioms and a satisfiable TBox, the toggle flips without error, the ABox
+populates with a live verdict, duplicate axioms are refused *by name*
+("ball-must-be-catchable already asserts that"), and add/delete/reset all repaint. Two bugs
+were caught only there — a stray `</content>` left in the spliced script, and a stale axiom
+list after an edit — neither of which any node test could see.
 
 #### Fine-tuning
 

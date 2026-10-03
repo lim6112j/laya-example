@@ -6,11 +6,21 @@
 // running simulation changes, and the constraint layer can be switched to the ontology
 // to check the two agree.
 //
-// The pure helpers below are exported separately from the DOM so they can be tested
-// without a browser; `mountOntologyPanel` is the only part that touches a document.
+// Almost none of that is fleet-specific any more. The editor itself lives in
+// ontology_core.js as `mountTBoxEditor`, because breakout needs the same panel. What is
+// left here is the fleet ADAPTER: which TBox, which vocabulary, what the ABox rows say,
+// and the one genuinely domain-specific behaviour — the seat limit has a second home in
+// `RULES.seats`, so editing the axiom has to write both.
+//
+// The pure helpers below are re-exported from the core rather than redefined, so
+// `test_ontology.mjs`'s import list resolves unchanged and there is one implementation of
+// `addAxiom` rather than two.
 
 import { TBOX, VOCABULARY, axiom, checkTBox, buildABox, reason, canServe,
          IMPLEMENTED_FORMS } from "./ontology.js";
+import { mountTBoxEditor, describeAxiom, addAxiom as coreAddAxiom,
+         removeAxiom as coreRemoveAxiom, resetTBox as coreResetTBox,
+         tboxStatus as coreTboxStatus, offerableForms } from "./ontology_core.js";
 import { RULES } from "./fleet_sim.js";
 
 // Snapshot at load, so `resetTBox` is exact rather than a hand-copied duplicate.
@@ -18,30 +28,13 @@ import { RULES } from "./fleet_sim.js";
 const PRISTINE = TBOX.map(a => ({ ...a, value: Array.isArray(a.value) ? [...a.value] : a.value }));
 const PRISTINE_SEATS = RULES.seats;
 
-// Which of these carry a number and which carry a class name. The set of forms offered
-// here is derived from IMPLEMENTED_FORMS rather than restated, so adding a form to the
-// reasoner makes it offerable here instead of leaving two lists to drift. `disjoint` is
-// implemented and checked but deliberately not offered: it takes a list of classes rather
-// than a single value, and the editor's value field is built for the other three.
-const forms = [
-  { value: "maxCardinality", label: "at most (maxCardinality)", numeric: true },
-  { value: "minCardinality", label: "at least (minCardinality)", numeric: true },
-  { value: "range", label: "values are of class (range)", numeric: false },
-].filter(f => IMPLEMENTED_FORMS.includes(f.value));
+export { describeAxiom };
+
+const forms = offerableForms(IMPLEMENTED_FORMS);
 
 export const axiomFormOptions = () => forms.map(f => ({ ...f }));
 export const classOptions = () => [...VOCABULARY.classes];
 export const propertyOptions = () => [...VOCABULARY.properties];
-
-/** A readable rendering of one axiom, for the list and for the TBox self-check text. */
-export function describeAxiom(a) {
-  if (!a) return "(removed)";
-  if (a.form === "maxCardinality") return `${a.subject} ⊑ ≤${a.value} ${a.property}`;
-  if (a.form === "minCardinality") return `${a.subject} ⊑ ≥${a.value} ${a.property}`;
-  if (a.form === "range") return `${a.subject}.${a.property} ⊑ ${a.value}`;
-  if (a.form === "disjoint") return `${a.value.join(" ⊥ ")}`;
-  return JSON.stringify(a);
-}
 
 /**
  * The seat limit is two values: the asserted one in the TBox and the configured one the
@@ -68,42 +61,10 @@ export function seatLimitAgrees() {
   return asserted !== null && asserted === configured;
 }
 
-export function addAxiom({ form, subject, property, value }) {
-  // Compared on form+subject+property, not on id: the shipped axioms carry hand-written
-  // ids ("bus-capacity", not "maxCardinality-Bus-onboardPassenger"), so an id comparison
-  // would let a semantic duplicate straight through.
-  const clash = TBOX.find(a =>
-    a.form === form && a.subject === subject && a.property === property);
-  if (clash) return { ok: false, error: `${clash.id} already asserts that` };
-  const numeric = forms.find(f => f.value === form)?.numeric;
-  const parsed = numeric ? Math.floor(Number(value)) : value;
-  if (parsed === undefined || parsed === null || (numeric && Number.isNaN(parsed))) {
-    return { ok: false, error: "that value is not valid for this axiom form" };
-  }
-  TBOX.push({ id: `${form}-${subject}-${property}`, form, subject, property, value: parsed });
-  return { ok: true, id: `${form}-${subject}-${property}` };
-}
-
-export function removeAxiom(id) {
-  const i = TBOX.findIndex(a => a.id === id);
-  if (i < 0) return { ok: false, error: "no such axiom" };
-  TBOX.splice(i, 1);
-  return { ok: true, id };
-}
-
-export function resetTBox() {
-  TBOX.splice(0, TBOX.length, ...PRISTINE.map(a => ({ ...a })));
-  RULES.seats = PRISTINE_SEATS;
-  return { ok: true };
-}
-
-/** Consistency of the axiom set, plus whether the declared axioms are all present. */
-export function tboxStatus() {
-  const check = checkTBox(TBOX);
-  const missing = PRISTINE.filter(p => !TBOX.some(a => a.id === p.id))
-    .map(p => ({ id: p.id, text: describeAxiom(p) }));
-  return { ...check, missing };
-}
+export const addAxiom = args => coreAddAxiom(TBOX, args, IMPLEMENTED_FORMS);
+export const removeAxiom = id => coreRemoveAxiom(TBOX, id);
+export const resetTBox = () => coreResetTBox(TBOX, PRISTINE, () => { RULES.seats = PRISTINE_SEATS; });
+export const tboxStatus = () => coreTboxStatus(TBOX, PRISTINE, IMPLEMENTED_FORMS);
 
 /** What the ontology currently believes about each bus, for the live ABox view. */
 export function aboxFor(buses) {
@@ -112,9 +73,16 @@ export function aboxFor(buses) {
     const probe = reason(facts);
     return {
       id: bus.label,
+      // Structured fields, kept because `test_ontology.mjs` reads them directly and the
+      // core editor is not the only consumer of this shape.
       aboard: [...bus.onboard],
       stops: bus.stops.length,
       position: `${Math.round(bus.x)}, ${Math.round(bus.y)}`,
+      // The rendered line the shared editor puts next to the id. Derived from the three
+      // fields above, so the two cannot disagree.
+      detail: `at (${Math.round(bus.x)}, ${Math.round(bus.y)}) · ` +
+              `${bus.onboard.size} aboard [${[...bus.onboard].join(",") || "—"}] · ` +
+              `${bus.stops.length} stops`,
       violations: probe.violations,
       unasserted: probe.unasserted,
     };
@@ -123,156 +91,51 @@ export function aboxFor(buses) {
 
 // ---- DOM ---------------------------------------------------------------------
 
-const el = (tag, props = {}, ...kids) => {
-  const node = Object.assign(document.createElement(tag), props);
-  // `append(null)` inserts the string "null" rather than skipping, and the conditional
-  // children below are all `cond ? node : null`.
-  for (const k of kids) { if (k !== null && k !== undefined) node.append(k); }
-  return node;
-};
+/** Tier 0 through the ontology, in the shape `insertSeq` expects. */
+function ontologyFeasibility(cand, bus) {
+  return canServe(bus, cand, RULES.seats).ok;
+}
 
-/**
- * Mount the editor into `root`. `getSim` supplies the live sim and `onChange` is called
- * after every mutation so the host can restart the run and re-render the fleet.
- */
 export function mountOntologyPanel({ root, getSim, onChange }) {
-  // Created once, outside rerender(), so it survives an axiom edit and can be refreshed
-  // independently. The ABox is a live view of the running sim; the axiom list is a form.
-  const aboxHost = el("div", { className: "abox" });
-
-  /** Repaint only the ABox. Cheap enough to call a few times a second. */
-  const refreshABox = () => {
-    const rows = aboxFor(getSim().buses);
-    aboxHost.replaceChildren(...rows.map(b => el("div", { className: "abrow" },
-      el("strong", { textContent: b.id }),
-      ` at (${b.position}) · ${b.aboard.length} aboard [${b.aboard.join(",") || "—"}] · ${b.stops} stops`,
-      b.violations.length
-        ? el("span", { className: "bad", textContent: ` · ${b.violations.length} violation(s)` })
-        : null,
-      b.unasserted.length ? el("span", { className: "warn", textContent: " · unasserted" }) : null,
-    )));
-  };
-
-  const rerender = () => {
-    const sim = getSim();
-    const status = tboxStatus();
-    const agree = seatLimitAgrees();
-    const { asserted, configured } = seatLimit();
-
-    root.replaceChildren();
-
-    // --- declared axioms
-    const list = el("div", { className: "axioms" });
-    for (const a of [...TBOX]) {
-      const numeric = forms.some(f => f.value === a.form && f.numeric);
-      // A disjoint axiom's value is its class list, which `describeAxiom` already
-      // renders — a second, truncated copy of it in the value column helps nobody.
-      const value = a.form === "disjoint"
-        ? el("span", { className: "axnone", textContent: "declared" })
-        : numeric
-        ? el("input", { type: "number", min: "0", value: String(a.value), className: "axval" })
-        : el("span", { className: "axval axfixed", textContent: String(a.value) });
-      if (numeric) {
-        value.addEventListener("change", () => {
-          // Only the seat limit has a second home (RULES.seats); everything else is
-          // declared once and read from here.
-          if (a.id === "bus-capacity") applySeatLimit(value.value);
-          else a.value = Math.max(0, Math.floor(Number(value.value)));
-          onChange(a.id);
-        });
-      }
-      list.append(el("div", { className: "axiom" },
-        el("code", { className: "axtext", textContent: describeAxiom(a) }),
-        value,
-        el("button", {
-          className: "axdel", title: "remove this axiom", textContent: "×",
-          onclick: () => { removeAxiom(a.id); onChange(a.id); },
-        }),
-        a.comment ? el("div", { className: "axnote", textContent: a.comment }) : null,
-      ));
-    }
-    root.append(el("h2", { textContent: `Ontology — TBox (${TBOX.length} axioms)` }), list);
-
-    if (status.missing.length) {
-      root.append(el("div", { className: "warn" },
-        `not asserted: ${status.missing.map(m => m.id).join(", ")} — ` +
-        `the ontology no longer enforces ${status.missing.map(m => m.text).join("; ")} ` +
-        `(shown as declared by default)`));
-    }
-    root.append(el("div", { className: status.satisfiable ? "ok" : "bad" },
-      status.satisfiable
-        ? "consistency: satisfiable — the axiom set is coherent"
-        : "UNSATISFIABLE: " + status.unsatisfiable.map(u => `${u.id} (${u.reason})`).join("; ")));
-
-    const seatNote = agreed => agreed
-      ? `the simulator follows the TBox (${configured} seats)`
-      : `MISMATCH: TBox asserts ${asserted ?? "nothing"}, simulator configured ${configured}`;
-    root.append(el("div", { className: agree ? "ok" : "bad", textContent: seatNote(agree) }));
-
-    // --- add an axiom
-    const sel = (options, value) => {
-      const s = el("select");
-      for (const o of options) {
-        const opt = typeof o === "string" ? { value: o, label: o } : o;
-        s.append(el("option", { value: opt.value, textContent: opt.label, selected: opt.value === value }));
-      }
-      return s;
-    };
-    const fSel = sel(axiomFormOptions(), "minCardinality");
-    const sSel = sel(classOptions(), "Bus");
-    const pSel = sel(propertyOptions(), "onboardPassenger");
-    const vIn = el("input", { type: "number", min: "0", value: "6", className: "axval" });
-    const syncValueForForm = () => {
-      const f = forms.find(x => x.value === fSel.value);
-      if (f.numeric) { vIn.type = "number"; vIn.className = "axval"; }
-      else { vIn.type = "text"; vIn.className = "axval axfixed"; vIn.value = "GridCell"; }
-    };
-    fSel.addEventListener("change", syncValueForForm);
-    const msg = el("span", { className: "axmsg" });
-    root.append(el("div", { className: "axadd" },
-      el("span", { className: "axaddlbl", textContent: "add" }),
-      fSel, sSel, pSel, vIn,
-      el("button", {
-        className: "axbtn", textContent: "+",
-        onclick: () => {
-          const r = addAxiom({
-            form: fSel.value, subject: sSel.value, property: pSel.value,
-            value: forms.find(x => x.value === fSel.value)?.numeric ? Number(vIn.value) : vIn.value,
-          });
-          msg.textContent = r.ok ? `added ${r.id}` : r.error;
-          if (r.ok) onChange(r.id);
-        },
-      }),
-      msg,
-    ));
-
-    // --- what the ontology currently believes
-    // aboxHost is created once and reused across every rerender, so it can be refreshed
-    // on a timer without touching the axiom rows — rebuilding the whole panel on a tick
-    // would steal focus from the seat-limit input mid-edit.
-    root.append(el("h2", { textContent: "Ontology — ABox (what it currently believes)" }),
-                aboxHost);
-
-    // --- enforcement toggle
-    const toggle = el("input", { type: "checkbox" });
-    toggle.checked = !!sim.config.feasibility;
-    toggle.addEventListener("change", () => onChange(toggle.checked ? "enforce" : "unenforce"));
-    root.append(el("div", { className: "axenforce" }, toggle,
-      el("label", { textContent: " enforce Tier 0 with the ontology" })));
-    root.append(el("div", { className: "axnote",
-      textContent: "The demo ships on the hand-written constraint layer. Turning this on " +
-                    "should not change any decision: the two constraint layers agreed on " +
-                    "600 of 600 bus/demand pairs, checked deterministically by " +
-                    "`node eval_rules.mjs`. Counting deliveries here is not that check — " +
-                    "this demo runs on wall-clock, so two runs see different demand counts. " +
-                    "What is visible here is that the two behave the same, not that they " +
-                    "are provably identical; the harness is where that is settled." }));
-
-    root.append(el("div", { className: "axreset" },
-      el("button", { className: "axbtn", textContent: "reset to declared defaults",
-                     onclick: () => { resetTBox(); onChange("reset"); } })));
-  };
-
-  rerender();
-  return { rerender, refreshABox };
+  return mountTBoxEditor({
+    root,
+    adapter: {
+      tbox: TBOX,
+      // Captured here, not at module load, so a second domain mounting its own panel
+      // snapshots its own TBox rather than this one.
+      pristine: PRISTINE,
+      onReset: () => { RULES.seats = PRISTINE_SEATS; },
+      implementedForms: IMPLEMENTED_FORMS,
+      vocabulary: VOCABULARY,
+      getSim,
+      aboxFor: sim => aboxFor(sim.buses),
+      notes: () => {
+        const { asserted, configured } = seatLimit();
+        const agree = seatLimitAgrees();
+        return [{
+          ok: agree,
+          text: agree
+            ? `the simulator follows the TBox (${configured} seats)`
+            : `MISMATCH: TBox asserts ${asserted ?? "nothing"}, simulator configured ${configured}`,
+        }];
+      },
+      // The seat limit is the one axiom whose value lives in two places.
+      onValueChange: (a, n) => {
+        if (a.id !== "bus-capacity") return true;
+        applySeatLimit(n);
+        return true;
+      },
+      enforceLabel: " enforce Tier 0 with the ontology",
+      enforceChecked: sim => !!sim.config.feasibility,
+      setEnforce: (sim, on) => { sim.config.feasibility = on ? ontologyFeasibility : null; },
+      note: "The demo ships on the hand-written constraint layer. Turning this on " +
+            "should not change any decision: the two constraint layers agreed on " +
+            "600 of 600 bus/demand pairs, checked deterministically by " +
+            "`node eval_rules.mjs`. Counting deliveries here is not that check — " +
+            "this demo runs on wall-clock, so two runs see different demand counts. " +
+            "What is visible here is that the two behave the same, not that they " +
+            "are provably identical; the harness is where that is settled.",
+      onChange,
+    },
+  });
 }

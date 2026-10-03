@@ -83,6 +83,21 @@ export const TBOX = [
 /** Look an axiom up by id, so a violation can name the axiom it broke. */
 export const axiom = id => TBOX.find(a => a.id === id);
 
+/**
+ * The axiom forms `reason()` actually evaluates.
+ *
+ * This is a hand-written reasoner, not a generic OWL 2 RL engine, so the set of things it
+ * can decide is closed and known. The TBox being data does not make the reasoner data-
+ * driven: an axiom in any other `form` would be carried, shown in the editor, and passed
+ * by `checkTBox` as coherent — while nothing ever reads it. That is the one failure a
+ * self-check must not have, because it reports a rule as enforced when it is inert.
+ *
+ * Adding a form therefore costs code in `reason()` *and* an entry here, and
+ * `checkTBox` refuses the TBox until both exist. See the README section on what this
+ * ontology is and is not.
+ */
+export const IMPLEMENTED_FORMS = ["maxCardinality", "minCardinality", "range", "disjoint"];
+
 // ---- TBox self-check ----------------------------------------------------------
 
 /**
@@ -97,6 +112,21 @@ export const axiom = id => TBOX.find(a => a.id === id);
  */
 export function checkTBox(tbox = TBOX) {
   const unsatisfiable = [];
+
+  // An axiom in a form nothing implements. Reported first, because it is the failure that
+  // hides the others: an unimplemented axiom is not merely unevaluated, it makes the whole
+  // set untrustworthy — `satisfiable: true` here would be a claim that the declared rules
+  // hold, when some of them are never consulted. Reject rather than warn, so the live
+  // editor cannot save a TBox that reads as enforced and is not.
+  for (const a of tbox) {
+    if (IMPLEMENTED_FORMS.includes(a.form)) continue;
+    unsatisfiable.push({
+      id: a.id,
+      reason: `form "${a.form}" is not implemented: no reasoner implements it, so this ` +
+              `axiom would be declared and never evaluated. Add it to IMPLEMENTED_FORMS ` +
+              `and give reason() a case for it.`,
+    });
+  }
 
   // Contradictory cardinality on the same (subject, property) pair.
   const bySlot = new Map();

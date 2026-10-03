@@ -13,7 +13,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  TBOX, VOCABULARY, axiom, checkTBox, buildABox, reason, canServe,
+  TBOX, VOCABULARY, axiom, checkTBox, buildABox, reason, canServe, IMPLEMENTED_FORMS,
 } from "./static/ontology.js";
 import {
   applySeatLimit, seatLimit, seatLimitAgrees, addAxiom, removeAxiom, resetTBox,
@@ -66,6 +66,41 @@ test("a disjoint axiom listing a class twice is caught", () => {
   const r = checkTBox([...TBOX, { id: "dup", form: "disjoint", value: ["Waiting", "Waiting"] }]);
   assert.equal(r.satisfiable, false);
   assert.match(r.unsatisfiable[0].reason, /lists Waiting twice/);
+});
+
+test("an axiom form nothing implements is rejected, not silently ignored", () => {
+  // reason() dispatches on `form`, and only four forms have code behind them. An axiom in
+  // any other form would be read by checkTBox, carried in the TBox, shown in the editor —
+  // and enforce nothing, which is the one failure a self-check must never have: reporting
+  // a coherent axiom set that is not actually enforced.
+  const unsupported = [...TBOX,
+    { id: "depot-range", form: "maxDistance", subject: "Bus", property: "depot", value: 10 }];
+  const r = checkTBox(unsupported);
+  assert.equal(r.satisfiable, false,
+    "an unimplemented form must not pass as a coherent axiom");
+  assert.match(r.unsatisfiable[0].reason, /maxDistance/);
+  assert.match(r.unsatisfiable[0].reason, /no reasoner implements/);
+});
+
+test("every form the reasoner can evaluate is one checkTBox accepts", () => {
+  // The two lists have to agree, or the check rejects axioms the reasoner does support.
+  // Each form needs a value of its own shape: disjoint reads `value` as the class list.
+  const probe = form => form === "disjoint"
+    ? { id: `probe-${form}`, form, value: ["Waiting", "Riding"] }
+    : { id: `probe-${form}`, form, subject: "Bus", property: "onboardPassenger", value: 2 };
+  for (const form of IMPLEMENTED_FORMS) {
+    const ok = checkTBox([probe(form)]);
+    assert.equal(ok.satisfiable, true,
+      `form "${form}" is listed as implemented but checkTBox rejects it: ` +
+      JSON.stringify(ok.unsatisfiable));
+  }
+});
+
+test("the shipped TBox uses only implemented forms", () => {
+  for (const a of TBOX) {
+    assert.ok(IMPLEMENTED_FORMS.includes(a.form),
+      `TBox axiom "${a.id}" uses form "${a.form}", which reason() does not evaluate`);
+  }
 });
 
 test("the soft parameters are deliberately not axioms", () => {

@@ -16,6 +16,41 @@ uv run python main.py
 The three checkpoints (`english`, `multilingual`, `typed-decisions`) are
 downloaded from Hugging Face on first use and cached in `~/.cache/huggingface`.
 
+### Intel Macs (x86_64)
+
+`uv sync` handles both architectures from one lockfile — the Intel-only caps in
+`pyproject.toml` are marked on `platform_machine`, and both branches are declared
+per package so `uv` forks rather than resolving a single version that satisfies
+everything:
+
+| | Intel (x86_64) | Apple Silicon (arm64) |
+|---|---|---|
+| torch | 2.2.2 | 2.11.0 |
+| numpy | 1.26.4 | 2.4.6 |
+| transformers | 4.57.6 | 5.18.0 |
+
+Intel is capped because PyTorch stopped publishing macOS x86_64 wheels after
+2.2.2, and that version forces two caps downstream: it is built against the
+numpy 1.x C ABI (numpy 2.x fails with `_ARRAY_API not found`), and transformers 5.x
+requires torch>=2.5, so on 2.2.2 it disables PyTorch and leaves `nn` undefined —
+the `NameError: name 'nn' is not defined` that greets a fresh Intel checkout.
+
+Two consequences worth knowing:
+
+- **Python is 3.11 on both Macs** (`requires-python = ">=3.11,<3.12"`).
+  transformers' ModernBERT module uses `@torch.compile`, and torch 2.2.2's Dynamo
+  refuses Python 3.12+. The upper bound is global, not per-arch, so the Silicon
+  Mac is held to 3.11 too even though torch 2.11 supports 3.12+. Per-arch lockfiles
+  would recover that.
+- **Intel runs on CPU.** MPS autocast needs torch>=2.4, so `laya_startup.py`'s
+  `_default_device()` probes `torch.autocast` rather than asking
+  `torch.backends.mps.is_available()` — on Intel those two disagree, the first
+  says yes while the second raises. Expect ~440 ms per prediction rather than
+  the ~35 ms an MPS machine gets.
+
+Verified on Intel: `main.py` runs both checkpoints, 19 Python and 45 Node tests
+pass. The arm64 column is from resolution, not execution.
+
 ## Web UI
 
 A browser UI for the same state / questions → result flow, backed by a
@@ -364,6 +399,133 @@ neutral: it silently disables the gate rather than mis-setting it.
 `act_probability` is reported but deliberately *not* gated on: measured at
 1.000 across every percentile here, so a floor on it would be dead code. Jev does
 not return the field at all, which the `?? 1` in `askCJet` absorbs.
+
+#### The ontology, and the enforce toggle
+
+`static/fleet.html` has an **Ontology** panel (left side) with a live TBox
+editor, an ABox view of what the reasoner currently believes, and one checkbox:
+**enforce Tier 0 with the ontology**.
+
+**Tier 0** is the hard-constraint layer — here, the seat limit. Everything else in
+this demo (detour distance, nearest-bus) is a *preference*. Tier 0 can be
+answered two ways:
+
+- the hand-written `capacityOk` — an integer comparison, `onboard.size < seats`.
+  This is the default and what the browser runs.
+- the TBox/ABox reasoner in `static/ontology.js` — axioms are *declared*
+  ("a bus may not exceed the seat limit") and a reasoner decides whether an
+  assignment is consistent with them.
+
+The toggle swaps the predicate. Nothing else changes: `ontology.js` never imports
+`fleet_sim.js`, so the dependency is one-way and the two cannot form a cycle.
+
+**Turning it on should not change any decision. If it does, that is a bug.** That
+is the whole point. The ontology is a few hundred lines of reasoner replacing a
+one-line integer check, so "do the two reach the same answer?" is the evidence
+that the declared axioms faithfully reimplement the code they replace — a
+hand-rolled `if` cannot be wrong in a way you can detect, but a declared axiom set
+can be compared against the thing it displaces.
+
+`node eval_rules.mjs` runs exactly that comparison, deterministically:
+
+```
+600 bus/demand pairs compared, 0 disagreements
+```
+
+**That 600 is weaker than it looks, and the panel says so.** `insertStops` returns
+`null` at the planning horizon *before* consulting the seat predicate — either
+implementation's. Re-measured: of the 600 pairs, **221 were refused by both**
+layers without the predicate ever being called, so the seat check actually fired
+on **379**. The equivalence is real but rests on fewer comparisons than the
+headline suggests.
+
+The browser demo is a *worse* place to check this than the harness, and the toggle's
+own note explains why: the demo runs on wall-clock, so two runs see different
+demand counts. Counting deliveries on screen is not that check. What is visible
+there is that the two behave the same — the harness is where it is settled.
+
+The stronger evidence is `test_ontology.mjs`, which compares the two predicates
+directly over 5,000+ candidate routes with the horizon bypassed, and passes.
+
+Editing the TBox (e.g. dropping the seat limit 4 → 2) restarts the simulator on
+the same seed, because routes planned under the old limit would otherwise linger.
+`checkTBox()` reports satisfiability live, so a contradictory axiom set is visible
+before it silently changes dispatch.
+
+##### What this ontology is not
+
+The TBox is data, but the reasoner is **not** data-driven, and the difference is
+worth being precise about because the demo's own framing invites the wrong reading.
+
+`reason()` dispatches on an axiom's `form`, and only four forms have code behind
+them — `IMPLEMENTED_FORMS` is that list. Everything else about an axiom *is* data:
+`subject`, `property`, and `value` are read from the TBox, which is why dropping the
+seat limit 4 → 2 changes dispatch with no code change at all. But the **kind** of
+constraint is code. Adding a genuinely new kind — "a bus may not drift more than
+10 cells from its depot" — is not a TBox edit.
+
+Before this was enforced, such an axiom passed `checkTBox()` as coherent, appeared
+in the editor, and was silently never evaluated: the self-check reported a rule as
+enforced while it was inert. `checkTBox()` now rejects any axiom whose `form` is not
+in `IMPLEMENTED_FORMS`, and the editor's form dropdown is derived from that same
+list rather than restating it. So the failure mode is gone, but the **cost** is
+still there — a new form requires code in `reason()` *and* an entry in the list, and
+the axiom is refused until both exist. This is fail-fast, not extensibility.
+
+Two related couplings remain, both deliberate:
+
+- **Three axiom ids are hardcoded** — `axiom("bus-capacity")`,
+  `axiom("demand-must-be-served")`, `axiom("passenger-single-state")`. Only
+  `range` is evaluated by a generic loop over the TBox. So the *value* of a
+  capacity axiom is data; the *connection* between an id and its check is not.
+- **Tier 1 is not in the ontology at all.** `reason()` takes `detour` as an
+  injected extension function, because insertion cost is optimisation rather than
+  logic. A violation the reasoner reports is always about Tier 0.
+
+A real OWL 2 RL engine (`owlrl`) was evaluated and rejected. Two findings, one of
+which is decisive and one of which is not.
+
+**It cannot run here at all.** `owlrl` is Python-only with no JS build, and
+`canServe` is an ES module shared by three consumers — `fleet.html`, `test_ontology.mjs`
+and `eval_rules.mjs`. Moving it server-side would delete the TBox editor, the ABox
+panel and the enforce toggle from the browser demo, and push both test suites over
+HTTP. That settles it on its own.
+
+**It is also slower, though not fatally so.** Measured against this repo's actual
+predicate (`owlrl` 7.6.2 / `rdflib` 7.6.0, in-process, minimal ABox of one bus and
+four passengers):
+
+| | per check | vs. now |
+|---|---|---|
+| this reasoner | 3.4–4.2 µs | — |
+| `owlrl`, ABox rebuilt each call | 23–25 ms | ~6,000× |
+| `owlrl`, graph reused, closure re-run | 11–12 ms | ~3,000× |
+| `owlrl`, closure on an already-settled graph | 10–12 ms | ~2,500× |
+
+The predicate runs 3.00× per demand (measured over 37 demand ticks, 111 calls), so
+`owlrl` would add ~70 ms per demand — 2% CPU at the slowest demand rate, 28% at the
+fastest. Slow, but not disqualifying on its own. The decisive number is the last row:
+`expand()` is forward-chaining and re-runs the whole rule set on every call, so even
+with the graph kept alive and nothing new to infer it still costs ~10 ms. About half
+the cost is avoidable ABox reconstruction; the other half is structural.
+
+That second half is the part worth noting, because it is what this module is already
+built to avoid. The TBox is a parsed module constant rather than re-parsed turtle; the
+ABox is a hand-built `Map` rather than an RDF graph; and `reason()` is a single pass
+over the axioms rather than a fixpoint. All three exist to keep those two costs at
+zero. An OWL-RL adoption would reintroduce both.
+
+Note also that the rebuild figure is a *floor*: it was measured on a minimal ABox, and
+inference cost scales with graph size, so the real demo's graph would be larger.
+
+**What the ontology actually buys here**, stated without overclaiming: for a seat
+limit, one line of `if` is sufficient and the reasoner is 300 lines of overkill.
+What it adds is that the rule is *declared*, so it can be contradicted
+(`checkTBox` catches `≥6` against `≤4`), it can name what it caught
+(`bus-capacity :: carries 5 passengers, at most 4 allowed`), and it can be
+compared against the code it replaces. A hand-written `if` cannot be wrong in any
+way you can detect. The tradeoff only starts paying if rules multiply far enough
+to interfere with each other — and this demo is not there yet.
 
 #### Fine-tuning
 

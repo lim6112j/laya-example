@@ -9,7 +9,8 @@
 // The pure helpers below are exported separately from the DOM so they can be tested
 // without a browser; `mountOntologyPanel` is the only part that touches a document.
 
-import { TBOX, VOCABULARY, axiom, checkTBox, buildABox, reason, canServe } from "./ontology.js";
+import { TBOX, VOCABULARY, axiom, checkTBox, buildABox, reason, canServe,
+         IMPLEMENTED_FORMS } from "./ontology.js";
 import { RULES } from "./fleet_sim.js";
 
 // Snapshot at load, so `resetTBox` is exact rather than a hand-copied duplicate.
@@ -17,11 +18,16 @@ import { RULES } from "./fleet_sim.js";
 const PRISTINE = TBOX.map(a => ({ ...a, value: Array.isArray(a.value) ? [...a.value] : a.value }));
 const PRISTINE_SEATS = RULES.seats;
 
+// Which of these carry a number and which carry a class name. The set of forms offered
+// here is derived from IMPLEMENTED_FORMS rather than restated, so adding a form to the
+// reasoner makes it offerable here instead of leaving two lists to drift. `disjoint` is
+// implemented and checked but deliberately not offered: it takes a list of classes rather
+// than a single value, and the editor's value field is built for the other three.
 const forms = [
   { value: "maxCardinality", label: "at most (maxCardinality)", numeric: true },
   { value: "minCardinality", label: "at least (minCardinality)", numeric: true },
   { value: "range", label: "values are of class (range)", numeric: false },
-];
+].filter(f => IMPLEMENTED_FORMS.includes(f.value));
 
 export const axiomFormOptions = () => forms.map(f => ({ ...f }));
 export const classOptions = () => [...VOCABULARY.classes];

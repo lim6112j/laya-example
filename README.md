@@ -742,18 +742,19 @@ Three things in that table are the point:
   than shortening the ask interval, which would cost 4×.
 
 **Three seeds is not many.** +1/+7/+1 wins three of three, but the sample is small enough that
-the confidence interval on +9 is wide. Re-run before trusting the magnitude:
+the confidence interval on +9 is wide. Seeds default to 11–13 so this table reproduces
+verbatim; widen them before trusting the magnitude:
 
 ```
 uv run uvicorn server:app                                   # terminal 1
 node eval_breakout.mjs --n 40 --seed 3 --loop --loopsecs 60
 ```
 
-Roughly 20 minutes for the full four arms — the runtime is dominated by real model calls, one
-per question. Raise `--loopsecs` for a tighter interval or narrow it to iterate; the `wall
-bounces seen` row tells you immediately whether a run had enough opportunities for the fix to
-be able to matter, and a run reporting a small bounce count cannot support a conclusion either
-way.
+Roughly 20 minutes for 40 seeds across the full four arms — the runtime is dominated by real
+model calls, one per question. Raise `--loopsecs` for a tighter interval or narrow `--n` to
+iterate; the `wall bounces seen` row tells you immediately whether a run had enough
+opportunities for the fix to be able to matter, and a run reporting a small bounce count cannot
+support a conclusion either way.
 
 **The axiom is now built and wired into the demo.** `command-stale-on-bounce` is in `TBOX`, and
 `breakout.html` enforces it every frame in `frame()`:

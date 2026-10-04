@@ -392,7 +392,14 @@ console.log(`  disagrees with the rollout on ${off.shortcut.disagreed} of ` +
 
 if (args.loop === true || args.loop === "true") {
   const LOOP_SECS = Number(args.loopsecs ?? 60);
-  const SEEDS = [11, 12, 13];
+  // Honour --seed/--n rather than a fixed list. It was hardcoded to [11,12,13] so the
+  // committed table could be reproduced exactly, but the README documents the run as
+  // `--n 40 --seed 3`, and that silently ran three seeds instead of forty — the reproduction
+  // instructions for the headline number did not do what they said. These seeds are kept as
+  // the default so the published table still reproduces verbatim; widen it explicitly.
+  const LOOP_SEED = Number(args.seed ?? 11);
+  const LOOP_N = Number(args.n ?? 3);
+  const SEEDS = Array.from({ length: LOOP_N }, (_, i) => LOOP_SEED + i);
   console.log(`\n=== closed loop: each arm driving its own game ===`);
   console.log(`  ${LOOP_SECS}s per run, ${SEEDS.length} seeds, model "${MODEL}", ` +
               `${DECIDE_EVERY}s decision cadence.`);

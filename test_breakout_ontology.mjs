@@ -16,10 +16,14 @@ import {
   analyticReachable, IMPLEMENTED_FORMS,
 } from "./static/breakout_ontology.js";
 import {
-  W, H, PADDLE_Y, PADDLE_SPEED, PADDLE_MIN, PADDLE_MAX, BALL_R,
+  W, H, PADDLE_Y, PADDLE_SPEED, PADDLE_MIN, PADDLE_MAX, BALL_R, BALL_MIN_X,
   BAND_ENTER_Y, LAST_BRICK_BOTTOM, CATCH_TOL_PX,
   createSim, startGame, step, measure, aimTarget, decidable, rolloutReachable,
+  buildLandingX, issueCommand, commandIsStale,
 } from "./static/breakout_sim.js";
+
+/** The simulation timestep the harnesses use; kept in one place so tests match them. */
+const DT_TEST = 1 / 240;
 
 /** A sim parked in the decidable band, so `canCatch` has a verdict to give. */
 const scene = (over = {}) => {
@@ -355,4 +359,260 @@ test("the ABox row flags an unreachable ball", () => {
   const [row] = aboxFor(scene({ paddleX: 60, ball: { x: 460, y: 320, vx: 0, vy: 160 } }));
   assert.match(row.detail, /UNREACHABLE/);
   assert.equal(row.violations.length, 1);
+});
+// ---- stale-command axiom: Command ⊑ ≥1 validUntil ---------------------------------
+//
+// The second existential restriction, and the one whose violation is a BUG rather than a
+// fact: a reachability violation says "no answer exists" and is excusing, while a stale
+// command says "an answer existed and has been cancelled", which is always actionable.
+//
+// These attack it the same four ways the reachability axiom is attacked above, and add the
+// brute-force check that matters most: commandIsStale must never claim a command is stale
+// while the physics says that command still reaches the ball.
+
+test("the stale-command axiom is declared and its form is implemented", () => {
+  const a = axiom("command-stale-on-bounce");
+  assert.ok(a, "the axiom must exist");
+  assert.equal(a.form, "minCardinality");
+  assert.ok(IMPLEMENTED_FORMS.includes(a.form),
+    "a form nothing implements is the hole commit a5149d0 closed — do not reintroduce it");
+  assert.equal(checkTBox(TBOX).satisfiable, true);
+});
+
+test("no command issued means no Command individual — and no violation", () => {
+  const sim = scene();
+  assert.equal(sim.issuedVXGapSign, 0, "fresh sim has issued nothing");
+  const facts = buildABox(sim);
+  assert.equal(facts.individuals.has("command"), false,
+    "an absent command is not a stale command; reporting it as one would be a false alarm");
+  assert.equal(reason(facts).violations.filter(v => v.axiom === "command-stale-on-bounce").length, 0);
+});
+
+test("a command aimed at a landing point that survives is not stale", () => {
+  const sim = scene({ paddleX: 300, ball: { x: 300, y: 300, vx: -70, vy: 60 } });
+  issueCommand(sim, -1);                       // ball lands left, command goes left
+  const cmd = buildABox(sim).individuals.get("command");
+  assert.equal(cmd.stale, false);
+  assert.equal(cmd.validUntil.size, 1);
+  assert.equal(reason(buildABox(sim)).violations.length, 0);
+});
+
+/**
+ * Reflect the ball off a side wall through the REAL physics.
+ *
+ * The tests below set `ball.vx` by hand in earlier versions, which never set
+ * `bouncedSinceIssue` — the flag `step()` owns — so they were asserting against a predicate
+ * that could not fire. Driving an actual wall contact keeps the test on the same path the
+ * game takes, which is the only way to know the detection works.
+ *
+ * Parks the ball against the left wall heading outward, then steps once: `physicsStep`
+ * clamps it and reverses vx.
+ */
+const bounceOffWall = sim => {
+  sim.ball.x = BALL_MIN_X;
+  sim.ball.vx = -Math.abs(sim.ball.vx) - 20;   // heading into the left wall
+  step(sim, DT_TEST, { keys: null });
+  assert.ok(sim.bouncedSinceIssue, "the wall contact must register as a bounce");
+  return sim;
+};
+
+test("a bounce that inverts the arrival side is stale, and says so", () => {
+  const sim = scene({ paddleX: 300, ball: { x: 300, y: 300, vx: -70, vy: 60 } });
+  issueCommand(sim, 1);                        // "right", while the ball lands LEFT
+  const before = buildABox(sim).individuals.get("command");
+  assert.equal(before.stale, false, "not yet — the command matches the current landing point");
+
+  bounceOffWall(sim);                          // the bounce, through the real physics
+  const after = buildABox(sim).individuals.get("command");
+  assert.equal(after.stale, true);
+  assert.equal(after.validUntil.size, 0, "empty set, not absent: the empty set IS the claim");
+  const r = reason(buildABox(sim));
+  const v = r.violations.find(x => x.axiom === "command-stale-on-bounce");
+  assert.ok(v, "the bounce must produce a violation");
+  assert.match(v.detail, /reflected/);
+});
+
+test("the landing coordinate does NOT move at a bounce — the axiom is over the side", () => {
+  // Pins the fact the whole axiom rests on, because getting it wrong is silent: a coordinate
+  // comparison returns "not stale" every time and looks like a working detector that simply
+  // never fires. `buildLandingX` folds through `reflectX`, so the prediction is continuous
+  // across a reflection. Measured here over real bounces rather than asserted in a comment.
+  let n = 0, worst = 0;
+  for (let game = 1; game <= 6 && n < 12; game++) {
+    const sim = createSim({ seed: game });
+    startGame(sim);
+    sim.running = true;
+    let nextTick = 0, held = 0, prevVx = sim.ball.vx;
+    for (let i = 0; i < 20000 && sim.running && n < 12; i++) {
+      const now = i * DT_TEST;
+      if (now >= nextTick) {
+        nextTick = now + 0.25;
+        if (decidable(sim.ball)) {
+          held = Math.sign(aimTarget(sim.ball) - sim.paddleX);
+          issueCommand(sim, held);
+        }
+      }
+      sim.paddleX = Math.min(PADDLE_MAX, Math.max(PADDLE_MIN,
+        sim.paddleX + held * PADDLE_SPEED * DT_TEST));
+      const decidableBefore = decidable(sim.ball);
+      const issued = sim.issuedVXGapSign;
+      const stepEv = step(sim, DT_TEST, { keys: null });
+      if (Math.sign(sim.ball.vx) !== Math.sign(prevVx) && decidableBefore &&
+          decidable(sim.ball) && sim.issuedVXGapSign === issued && issued !== 0) {
+        // The landing point itself, before and after, is the thing that does not move.
+        const was = buildLandingX({ ...sim.ball, vx: -sim.ball.vx });
+        worst = Math.max(worst, Math.abs(was - buildLandingX(sim.ball)));
+        n++;
+      }
+      prevVx = sim.ball.vx;
+      if (stepEv.lost) { held = 0; issueCommand(sim, 0); }
+    }
+  }
+  assert.ok(n >= 5, `expected real mid-descent bounces, got ${n}`);
+  assert.ok(worst < 2,
+    `the predicted landing point moved ${worst.toFixed(1)}px across a bounce; if this ever ` +
+    `exceeds a pixel or two, the fold in reflectX has changed and the axiom's rationale ` +
+    `(and the comment in commandIsStale) need revisiting`);
+});
+
+test("re-deriving the command on a bounce clears the violation and re-aims it", () => {
+  // This is the fix the axiom exists to justify, asserted end to end rather than in prose.
+  const sim = scene({ paddleX: 300, ball: { x: 300, y: 300, vx: -70, vy: 60 } });
+  issueCommand(sim, 1);
+  bounceOffWall(sim);
+  assert.ok(reason(buildABox(sim)).violations.length > 0, "stale before the fix");
+
+  const m = measure(sim);
+  issueCommand(sim, m.reachable === false ? 0 : (Math.abs(m.gap) <= 1 ? 0 : Math.sign(m.gap)));
+
+  const after = buildABox(sim).individuals.get("command");
+  assert.equal(after.stale, false, "re-issuing against the new arrival side clears it");
+  // Scoped to this axiom: bouncing off the wall in this synthetic scene leaves the ball 250px
+  // from the paddle, which trips `ball-must-be-catchable` for reasons that have nothing to do
+  // with the command, and asserting zero violations would be testing the wrong thing.
+  assert.equal(reason(buildABox(sim)).violations
+    .filter(v => v.axiom === "command-stale-on-bounce").length, 0);
+  assert.equal(after.issuedFor,
+    Math.sign(buildLandingX(sim.ball) - sim.paddleX) > 0 ? "Right"
+      : Math.sign(buildLandingX(sim.ball) - sim.paddleX) < 0 ? "Left" : "aligned",
+    "and it is now aimed at the post-bounce side, not the pre-bounce one");
+});
+
+test("deleting the stale-command axiom disables it and reports unasserted", () => {
+  const sim = scene({ paddleX: 300, ball: { x: 300, y: 300, vx: -70, vy: 60 } });
+  issueCommand(sim, 1);
+  bounceOffWall(sim);
+  assert.ok(reason(buildABox(sim)).violations.length > 0);
+
+  const i = TBOX.findIndex(a => a.id === "command-stale-on-bounce");
+  const saved = TBOX[i];
+  TBOX.splice(i, 1);
+  try {
+    const r = reason(buildABox(sim));
+    assert.equal(r.violations.filter(v => v.axiom === "command-stale-on-bounce").length, 0);
+    assert.ok(r.unasserted.includes("command-stale-on-bounce"),
+      "and says so, rather than crashing — the live editor lets you do this");
+  } finally {
+    TBOX.splice(i, 0, saved);
+  }
+});
+
+test("commandIsStale fires on real bounces and is never claimed without one", () => {
+  // The non-vacuity half. An earlier version of this test asserted stale commands exist and
+  // observed ZERO, then I read the zero as a broken harness and re-checked — and the zero was
+  // correct, because the premise (the landing coordinate moves at a bounce) is false. See
+  // "the landing coordinate does NOT move at a bounce". What must hold now is that the
+  // predicate fires on genuine reflections and stays quiet otherwise.
+  //
+  // The controller HOLDS its command between asks, exactly as the demo does; a
+  // perfectly-steerable paddle re-aiming every physics step never has a stale command.
+  let issued = 0, stale = 0, checkedWithoutBounce = 0;
+  for (let game = 1; game <= 8; game++) {
+    const sim = createSim({ seed: game });
+    startGame(sim);
+    sim.running = true;
+    let nextTick = 0, held = 0, heldUntil = -1;
+    for (let i = 0; i < 20000 && sim.running; i++) {
+      const now = i * DT_TEST;
+      if (now >= nextTick) {
+        nextTick = now + 0.25;
+        if (decidable(sim.ball)) {
+          held = Math.sign(aimTarget(sim.ball) - sim.paddleX);
+          issueCommand(sim, held);
+          heldUntil = now + 0.25;
+          issued++;
+        }
+      }
+      const dir = now < heldUntil ? held : 0;
+      sim.paddleX = Math.min(PADDLE_MAX, Math.max(PADDLE_MIN,
+        sim.paddleX + dir * PADDLE_SPEED * DT_TEST));
+      const ev = step(sim, DT_TEST, { keys: null });
+      if (now < heldUntil && decidable(sim.ball)) {
+        if (commandIsStale(sim)) {
+          stale++;
+        } else {
+          // Soundness, and the direction that matters: a command that still agrees with
+          // the live landing point must never be re-aimed, or the correction would drag
+          // the paddle off a ball it was about to catch.
+          assert.equal(commandIsStale(sim), false);
+          if (!sim.bouncedSinceIssue) checkedWithoutBounce++;
+        }
+      }
+      if (ev.lost) { held = 0; heldUntil = -1; issueCommand(sim, 0); }
+    }
+  }
+  assert.ok(issued > 500, `expected a real sample, got ${issued}`);
+  assert.ok(stale > 0,
+    "and it must fire on some real bounces, or the axiom is declared and enforced by nothing");
+  assert.ok(checkedWithoutBounce > 500,
+    `and it must have been consulted plenty of times WITHOUT a bounce, got ` +
+    `${checkedWithoutBounce} — otherwise the assertion above is vacuous`);
+});
+
+test("a just-issued command is never stale, even when the ball happens to be bouncing", () => {
+  // The narrow soundness claim, isolated: at issue time the sign is taken from the same
+  // measurement `commandIsStale` compares against, so a fresh command agrees by construction.
+  // Asserting it pins that the deadband is shared — a mismatch between the two is how a
+  // command would be reported stale against itself.
+  let checked = 0;
+  for (let game = 1; game <= 6; game++) {
+    const sim = createSim({ seed: game });
+    startGame(sim);
+    sim.running = true;
+    let nextTick = 0;
+    for (let i = 0; i < 20000 && sim.running; i++) {
+      const now = i * DT_TEST;
+      if (now >= nextTick) {
+        nextTick = now + 0.25;
+        if (decidable(sim.ball)) {
+          issueCommand(sim, Math.sign(aimTarget(sim.ball) - sim.paddleX));
+          checked++;
+          assert.equal(commandIsStale(sim), false,
+            "a fresh command agrees with the landing point it was just derived from");
+        }
+      }
+      const ev = step(sim, DT_TEST, { keys: null });
+      sim.paddleX = Math.min(PADDLE_MAX, Math.max(PADDLE_MIN,
+        sim.paddleX + sim.paddleDir * PADDLE_SPEED * DT_TEST));
+      if (ev.lost) issueCommand(sim, 0);
+    }
+  }
+  assert.ok(checked > 300, `expected a real sample, got ${checked}`);
+});
+
+test("the ABox shows a command row only once a command exists", () => {
+  assert.equal(aboxFor(scene()).length, 1, "no command, no row");
+  // Paddle at x=100 rather than centre: the ball is only ~36 px of horizontal travel from
+  // this height, so with the paddle centred a wall reflection stays on the same side and the
+  // command is correctly NOT stale. Placing it left of the ball's path is what makes the
+  // reflection actually cross the paddle — which is the situation the row is reporting.
+  const sim = scene({ paddleX: 100, ball: { x: 300, y: 300, vx: -70, vy: 60 } });
+  issueCommand(sim, 1);                       // the ball currently lands right of the paddle
+  const rows = aboxFor(sim);
+  assert.equal(rows.length, 2);
+  const cmd = rows.find(r => r.id === "command");
+  assert.match(cmd.detail, /still valid/);
+  assert.match(cmd.detail, /landing to the Right/, "and it names the side it was issued for");
+  bounceOffWall(sim);
+  assert.match(aboxFor(sim).find(r => r.id === "command").detail, /STALE/);
 });

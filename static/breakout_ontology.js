@@ -24,7 +24,7 @@
 import {
   PADDLE_Y, PADDLE_SPEED, BALL_R,
   LAST_BRICK_BOTTOM, BAND_ENTER_Y, CATCH_TOL_PX,
-  decidable, rolloutReachable, buildLandingX, measure,
+  decidable, rolloutReachable, buildLandingX, measure, commandIsStale,
 } from "./breakout_sim.js";
 import { checkTBox as coreCheckTBox } from "./ontology_core.js";
 
@@ -36,9 +36,13 @@ export const VOCABULARY = {
   // `disjoint` axiom lists class names by definition, and `paddle-single-command` asserts
   // over exactly those three. Declaring them as bare strings the vocabulary does not know
   // would let an axiom reference a name nothing else in the file can resolve.
+  //
+  // `Command` and `Stale` come from the stale-command axiom. `Command` is the individual a
+  // held answer, and `Stale` is the state it falls into when the ball bounces and the
+  // coordinate it was issued against no longer exists. See `command-stale-on-bounce`.
   classes: ["Ball", "Paddle", "GridCell", "Ascending", "Descending", "Caught", "Lost",
-            "Left", "Stay", "Right"],
-  properties: ["position", "catchableBy", "commanded", "state"],
+            "Left", "Stay", "Right", "Command", "Stale"],
+  properties: ["position", "catchableBy", "commanded", "state", "issuedFor", "validUntil"],
   // A ball's lifecycle states are mutually exclusive. `Ball` itself is a thing, not a
   // state; the four below are the four mutually exclusive ones.
   states: ["Ascending", "Descending", "Caught", "Lost"],
@@ -59,6 +63,22 @@ export const TBOX = [
     comment: "Tier 0. A descending ball below the bricks that no paddle command reaches. " +
              "The verdict comes from the physics rollout in breakout_sim.js, injected — " +
              "this axiom declares that the answer exists, not how to compute it.",
+  },
+  {
+    id: "command-stale-on-bounce",
+    form: "minCardinality",
+    subject: "Command",
+    property: "validUntil",
+    value: 1,
+    comment: "A command is issued against the SIDE of the paddle the ball was headed for when " +
+             "the model answered. If the ball then reflects off a side wall, that side can " +
+             "invert, so the command has no valid target and the paddle is steering toward " +
+             "a trajectory that was cancelled. Stated over the side rather than the landing " +
+             "coordinate because buildLandingX folds through reflectX and is continuous " +
+             "across a reflection — the coordinate does not move, so comparing it detects " +
+             "nothing. This is the one axiom in this file whose violation is actionable " +
+             "rather than excusing: unlike a reachability violation, it is never right — " +
+             "re-deriving the command from the live sim costs no model call.",
   },
   {
     id: "paddle-single-command",
@@ -158,6 +178,36 @@ export function buildABox(sim, opts = {}) {
     commanded: "Stay",
   });
 
+  // The held command as its own individual, so `command-stale-on-bounce` has something to
+  // assert over. `validUntil` is the set of conditions under which the command still has a
+  // target; it is EMPTY when the command is stale, which is the violation. Empty-not-absent,
+  // same convention as `catchableBy`: under closed-world reasoning the empty set is the
+  // claim, not a missing fact.
+  //
+  // Absent entirely when no command has been issued, which is a different state and must
+  // not be reported as a stale command — there is nothing to be stale. That is the same
+  // reason `commandIsStale` requires a bounce to have occurred: it reports on commands, and
+  // a command that is merely old has not lost its target.
+  if (sim.paddleDir !== 0 || sim.issuedVXGapSign !== 0) {
+    const stale = opts.isStale ? opts.isStale(sim) : commandIsStale(sim);
+    const m2 = measure(sim);
+    add("command", "Command", {
+      // Which side of the paddle the ball was headed for when the model answered — the
+      // target the command names. A side, not a coordinate: `buildLandingX` is continuous
+      // across a reflection, so the coordinate cannot be what a bounce invalidates.
+      issuedFor: sim.issuedVXGapSign === 0 ? "aligned"
+        : sim.issuedVXGapSign > 0 ? "Right" : "Left",
+      // Where the ball is headed now. Equal sides after a bounce is what makes the
+      // command stale; unequal sides is a command that simply needs re-deriving.
+      validUntil: stale ? new Set() : new Set(["LandingPoint"]),
+      stale,
+      commanded: sim.paddleDir === -1 ? "Left" : sim.paddleDir === 1 ? "Right" : "Stay",
+      // Which side the ball is headed for now, for the violation message. Computed here
+      // rather than in reason() so the reasoner stays a pure function of the ABox.
+      nowSide: Math.abs(m2.gap) <= 1 ? "aligned" : m2.gap > 0 ? "Right" : "Left",
+    });
+  }
+
   return facts;
 }
 
@@ -199,6 +249,33 @@ export function reason(facts, { extensions = {} } = {}) {
               `${Math.abs(m.gap).toFixed(0)} px and arrives in ` +
               `${m.timeToContact.toFixed(2)} s, which no left/stay/right command recovers`
             : "catchable by no command — no left/stay/right recovers this ball",
+        });
+      }
+    }
+  }
+
+  // minCardinality: Command ⊑ ≥1 validUntil
+  //
+  // The second existential restriction, and the one whose violation is a bug rather than a
+  // fact. A reachability violation says "no answer exists"; a stale-command violation says
+  // "an answer existed and has since been cancelled", which is always actionable —
+  // re-derive it from the live sim, at no model cost.
+  //
+  // Like the reachability axiom, deleting it in the live editor disables the check rather
+  // than crashing, and that is reported as unasserted.
+  const validCmd = axiom("command-stale-on-bounce");
+  if (!validCmd) {
+    unasserted.push("command-stale-on-bounce");
+  } else {
+    for (const [id, ind] of facts.individuals) {
+      if (ind.type !== "Command") continue;
+      if (ind.validUntil.size < validCmd.value) {
+        violations.push({
+          axiom: validCmd.id,
+          subject: id,
+          detail: `the command was issued for a ball landing to the ${ind.issuedFor} of the paddle, ` +
+            `but the ball has since reflected off a side wall and now lands to the ` +
+            `${ind.nowSide} — the paddle is steering toward a trajectory that no longer exists`,
         });
       }
     }
@@ -327,10 +404,27 @@ export function aboxFor(sim) {
       : `at (${Math.round(sim.ball.x)}, ${Math.round(sim.ball.y)}) → lands at ` +
         `${Math.round(m.landingX)} · ${Math.abs(m.gap).toFixed(0)} px away with ` +
         `${(PADDLE_SPEED * m.timeToContact).toFixed(0)} px of travel left · UNREACHABLE`;
-  return [{
+  const rows = [{
     id: "ball",
     detail,
     violations: probe.violations,
     unasserted: probe.unasserted,
   }];
+
+  // The held command, as its own row. Only shown once a command has been issued — before
+  // that there is nothing to be stale, and an empty row would read as a finding.
+  const cmd = facts.individuals.get("command");
+  if (cmd) {
+    rows.push({
+      id: "command",
+      detail: `issued for a ball landing to the ${cmd.issuedFor} of the paddle · ` +
+              `${cmd.commanded}${cmd.stale ? " · STALE: the ball has since bounced and now " +
+              `lands to the ${cmd.nowSide}, so this command points at a cancelled trajectory`
+                : " · still valid"}`,
+      violations: probe.violations.filter(v => v.subject === "command"),
+      unasserted: probe.unasserted.filter(u => u === "command-stale-on-bounce"),
+    });
+  }
+
+  return rows;
 }

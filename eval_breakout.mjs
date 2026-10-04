@@ -32,7 +32,7 @@
 import {
   W, H, PADDLE_SPEED, PADDLE_MIN, PADDLE_MAX, BALL_R, DEFAULT_CONFIG,
   BAND_ENTER_Y, LAST_BRICK_BOTTOM, QUESTION,
-  createSim, startGame, step, aliveBricks, buildState,
+  createSim, startGame, step, aliveBricks, buildState, measure,
   aimTarget, rolloutReachable, decidable,
 } from "./static/breakout_sim.js";
 import { canCatch, checkTBox, TBOX, analyticReachable } from "./static/breakout_ontology.js";
@@ -238,9 +238,13 @@ async function closedLoop(arm, seed, seconds) {
   const sim = createSim({ seed, config: { ...DEFAULT_CONFIG } });
   startGame(sim);
   const ticks = Math.round(seconds / DT);
-  const gate = arm === "ontology-off" ? gateOff : gateOn;
+  // `reaim` is the stale-command arm. It is orthogonal to the ontology gate, so it composes
+  // with either: "ontology-on" vs "reaim" vs "ontology-on+reaim".
+  const gateOnArm = arm === "ontology-on" || arm === "ontology-on+reaim";
+  const reaim = arm === "reaim" || arm === "ontology-on+reaim";
+  const gate = gateOnArm ? gateOn : gateOff;
   const stats = { asked: 0, suppressed: 0, calls: 0, provablyLost: 0, lostAfterAsk: 0,
-                  failedCalls: 0 };
+                  failedCalls: 0, bounces: 0, reaims: 0 };
 
   // The paddle command currently in force, and when it expires. Held rather than re-aimed,
   // because that is what a `choice` question with a 250ms cadence actually produces.
@@ -279,19 +283,43 @@ async function closedLoop(arm, seed, seconds) {
     held = choice === "left" ? -1 : choice === "right" ? 1 : 0;
   };
 
-  let nextAsk = 0, now = 0;
+  let nextAsk = 0, now = 0, prevVx = sim.ball.vx;
   for (let i = 0; i < ticks && sim.running; i++) {
     now = i * DT;
     if (now >= nextAsk) { nextAsk = now + DECIDE_EVERY; await ask(); heldUntil = now + DECIDE_EVERY; }
     const dir = now < heldUntil ? held : 0;
     sim.paddleX = Math.min(PADDLE_MAX, Math.max(PADDLE_MIN, sim.paddleX + dir * PADDLE_SPEED * DT));
     const ev = step(sim, DT, { keys: null });
+
+    // The stale-command arm. When the ball reflects off a side wall, the command issued at
+    // the last ask was computed against a landing point that no longer exists — the paddle
+    // is now driving toward the pre-bounce trajectory. Re-derive it from the CURRENT state.
+    //
+    // This costs NO extra model call: the fix re-uses the already-loaded `measure()` over the
+    // live sim, which is exactly what the browser can do at 60fps. That is the whole appeal
+    // of this arm over simply shortening the ask interval — it reacts to the rare event
+    // rather than paying 4x the calls to react to every moment.
+    //
+    // Clamped to the ORIGINAL expiry, not the ask cadence: re-arming the full 0.25s here
+    // holds a fresh command past the deadline that produced it, and that regresses. The
+    // bounce corrects the command's target; it does not buy the command more time.
+    if (reaim && Math.sign(sim.ball.vx) !== Math.sign(prevVx) && now < heldUntil) {
+      stats.bounces++;
+      const m = measure(sim);
+      held = m.reachable === false ? 0
+        : (Math.abs(m.gap) <= 1 ? 0 : Math.sign(m.gap));
+      heldUntil = Math.min(heldUntil, now + DECIDE_EVERY);
+      stats.reaims++;
+    }
+    prevVx = sim.ball.vx;
+
     if (ev.lost) {
       // `false` is the only verdict that earns the ontology credit. `null` — no verdict
       // exists — counts against the model, the conservative direction.
       if (verdictAtAsk === false) stats.provablyLost++; else stats.lostAfterAsk++;
       verdictAtAsk = null;
       heldUntil = -1;
+      prevVx = sim.ball.vx;
       nextAsk = now;   // ask again about the respawned ball immediately
     }
   }
@@ -389,7 +417,7 @@ if (args.loop === true || args.loop === "true") {
     process.exit(0);
   }
 
-  const cols = ["ontology-off", "ontology-on"];
+  const cols = ["ontology-off", "ontology-on", "reaim", "ontology-on+reaim"];
   const rows = {};
   for (const arm of cols) {
     const runs = [];
@@ -406,27 +434,46 @@ if (args.loop === true || args.loop === "true") {
     ["questions suppressed", r => String(Math.round(mean(r.map(x => x.suppressed))))],
     ["provably lost", r => mean(r.map(x => x.provablyLost)).toFixed(1)],
     ["lost after an ask", r => mean(r.map(x => x.lostAfterAsk)).toFixed(1)],
+    ["wall bounces seen", r => String(r.reduce((a, x) => a + x.bounces, 0))],
     ["api calls", r => String(r.reduce((a, x) => a + x.calls, 0))],
     ["failed calls", r => String(r.reduce((a, x) => a + x.failedCalls, 0))],
     ["bricks left", r => mean(r.map(x => x.bricks)).toFixed(1)],
     ["score", r => mean(r.map(x => x.score)).toFixed(1)],
   ];
-  console.log("".padEnd(w2) + cols.map(c => c.padStart(16)).join(""));
-  console.log("-".repeat(w2 + 16 * cols.length));
+  const colW = 18;
+  console.log("".padEnd(w2) + cols.map(c => c.padStart(colW)).join(""));
+  console.log("-".repeat(w2 + colW * cols.length));
   for (const [label, fn] of labels) {
-    console.log(label.padEnd(w2) + cols.map(c => String(fn(rows[c])).padStart(16)).join(""));
+    console.log(label.padEnd(w2) + cols.map(c => String(fn(rows[c])).padStart(colW)).join(""));
   }
 
-  const offLost = mean(rows["ontology-off"].map(r => r.provablyLost + r.lostAfterAsk));
-  const onLost = mean(rows["ontology-on"].map(r => r.provablyLost + r.lostAfterAsk));
-  console.log(`\n  total balls lost: ${offLost.toFixed(1)} with the ontology off, ` +
-              `${onLost.toFixed(1)} with it on.`);
-  console.log(`  These should be close. A large drop would mean the gate removed balls that`);
-  console.log(`  the arm could otherwise have saved, which is the failure the invariant`);
-  console.log(`  forbids — check "suppressed but actually catchable" above, which is zero.`);
-  console.log(`  A rise would mean the arm that asked fewer questions steered worse, which`);
-  console.log(`  is a statement about the MODEL holding a command for ${DECIDE_EVERY}s, not`);
-  console.log(`  about the ontology. Neither column is a score improvement.`);
+  // ---- the headline: does re-aiming on a bounce beat holding a stale command? ----
+  // This is the A/B that matters, and it is asked against the REAL model rather than the
+  // simulated controller in tools/stale_command.mjs. The tool found +48 against a synthetic
+  // controller; that number does NOT transfer, because it assumed the controller's error is
+  // purely "held too long". A real model is also often simply wrong about the direction, and
+  // correcting a wrong-but-current answer at the bounce can churn. So this is measured, not
+  // assumed — per-seed, against the model actually in the loop.
+  console.log(`\n  === re-aim vs hold, per seed (${LOOP_SECS}s each) ===`);
+  let wins = 0, losses = 0, ties = 0, net = 0;
+  SEEDS.forEach((sd, i) => {
+    const base = rows["ontology-off"][i].score, fix = rows["reaim"][i].score;
+    const d = fix - base;
+    if (d > 0) wins++; else if (d < 0) losses++; else ties++;
+    net += d;
+    process.stdout.write(`    seed ${sd}: off ${String(base).padStart(4)} -> reaim ` +
+                        `${String(fix).padStart(4)}  (${d > 0 ? "+" : ""}${d})\n`);
+  });
+  console.log(`    re-aim wins ${wins}, loses ${losses}, ties ${ties}; net score ` +
+              `${net > 0 ? "+" : ""}${net}.`);
+  console.log(`    "off" is the plain demo; "reaim" additionally re-derives the held command`);
+  console.log(`    when the ball bounces, at no extra api cost. A tie here does NOT mean the`);
+  console.log(`    fix is worthless — check the "wall bounces seen" row above: if that is`);
+  console.log(`    small, there were too few opportunities for it to matter.`);
+  console.log(`    tools/stale_command.mjs reports +48 against a SIMULATED controller; that`);
+  console.log(`    number does not transfer here, because a real model is also often wrong`);
+  console.log(`    about the direction itself, and correcting a wrong-but-current answer at the`);
+  console.log(`    bounce can churn. This table is the one to believe.`);
 } else {
   console.log(`\n  (pass --loop to also drive each arm end to end against a live server; ` +
               `that costs one api call per question)`);

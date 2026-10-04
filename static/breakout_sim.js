@@ -191,11 +191,70 @@ export function createSim({ seed = 1, config = {} } = {}) {
     ball: null, paddleX: W / 2, bricks: [], score: 0, lives: 3,
     running: false, paused: false,
     paddleDir: 0,            // CJet's current command: -1 | 0 | 1
+    // What that command was issued against, and whether the world has moved since.
+    //
+    // `issuedVXGapSign` is the SIGN of the gap — which side of the paddle the ball's
+    // landing point was on — at the moment the answer was applied. That sign, not the
+    // landing coordinate, is what a later reflection can invalidate; see
+    // `commandIsStale` for why the coordinate cannot be. `null` means no command has been
+    // issued yet, which is not the same as "issued and still valid".
+    issuedVXGapSign: 0,
+    // Set when the ball's horizontal velocity reverses while a command is held. It is the
+    // EVENT the axiom is about; `commandIsStale` is only consulted once this is true.
+    bouncedSinceIssue: false,
     config: { ...DEFAULT_CONFIG, ...config },
     rng: mulberry32(seed),
   };
   resetBall(sim);
   return sim;
+}
+
+/**
+ * Record a command and the direction it was issued against.
+ *
+ * Called whenever the model's answer is applied, so the pair stays in step with `paddleDir`.
+ * The sign is taken with the same deadband the decision loop uses (`|gap| <= 1` reads as
+ * Stay), so a command issued while the paddle is already aligned is not recorded as
+ * pointing left or right and then reported stale for merely being aligned.
+ */
+export function issueCommand(sim, dir) {
+  sim.paddleDir = dir;
+  const gap = measure(sim).gap;
+  sim.issuedVXGapSign = Math.abs(gap) <= 1 ? 0 : Math.sign(gap);
+  sim.bouncedSinceIssue = false;
+}
+
+/**
+ * Has the command's target been cancelled?
+ *
+ * ONLY consult this after `bouncedSinceIssue` is true — it is false otherwise, because a
+ * command steering toward a landing point that has not moved is not stale, however long ago
+ * it was issued.
+ *
+ * WHY IT COMPARES SIGNS AND NOT COORDINATES, which is the whole design and the mistake an
+ * earlier version made. The obvious reading of "the command was issued for a landing point,
+ * and the ball has since reflected" is to store the landing coordinate and compare it with
+ * the current one. That detects nothing, and not because of a subtlety — `buildLandingX`
+ * folds the trajectory through `reflectX`, so the predicted landing point is CONTINUOUS
+ * across a reflection by construction. Measured over 12 reflections observed mid-descent,
+ * the issued and current landing points agreed to within 0.7 px every time; the premise the
+ * coordinate comparison rests on is simply false.
+ *
+ * What a reflection actually invalidates is the SIDE of the paddle the ball will arrive on.
+ * That is what the paddle is driving toward and what the model's answer named, and a
+ * reflection can invert it while leaving the predicted coordinate nearly where it was. So
+ * the axiom is stated over the sign, which is the part that can change.
+ *
+ * A stale command is only reported when the held direction is non-zero and disagrees with
+ * the live truth: a held Stay is never stale, because there is no direction to be wrong
+ * about, and reporting one would fire the correction on every settled ball.
+ */
+export function commandIsStale(sim) {
+  if (!sim.bouncedSinceIssue || !sim.ball) return false;
+  if (sim.issuedVXGapSign === 0 || sim.paddleDir === 0) return false;
+  const gap = measure(sim).gap;
+  const truth = Math.abs(gap) <= 1 ? 0 : Math.sign(gap);
+  return truth !== 0 && truth !== sim.paddleDir;
 }
 
 export function resetBall(sim) {
@@ -207,6 +266,10 @@ export function resetBall(sim) {
     vy: -sim.config.ballSpeed,
   };
   sim.paddleDir = 0;
+  // A respawned ball invalidates any command aimed at the old one, and it has by definition
+  // not bounced yet, so both fields go back to their no-command-issued values.
+  sim.issuedVXGapSign = 0;
+  sim.bouncedSinceIssue = false;
 }
 
 export function startGame(sim) {
@@ -247,9 +310,15 @@ export function step(sim, dt, { keys = null } = {}) {
   ball.x += ball.vx * dt;
   ball.y += ball.vy * dt;
 
+  // Record the horizontal reflection, so `commandIsStale` has the EVENT it is about. Set
+  // from the velocity sign rather than from the wall-clamp branches below because a paddle
+  // bounce also reverses vx and would otherwise be indistinguishable from a wall bounce —
+  // and only the wall bounce cancels the landing point the command was issued against.
+  const vxBefore = ball.vx;
   if (ball.x < BALL_MIN_X) { ball.x = BALL_MIN_X; ball.vx = Math.abs(ball.vx); }
   if (ball.x > BALL_MAX_X) { ball.x = BALL_MAX_X; ball.vx = -Math.abs(ball.vx); }
   if (ball.y < BALL_R) { ball.y = BALL_R; ball.vy = Math.abs(ball.vy); }
+  if (Math.sign(ball.vx) !== Math.sign(vxBefore)) sim.bouncedSinceIssue = true;
 
   // paddle bounce: exit angle depends on where the ball lands on the paddle
   if (ball.vy > 0 && ball.y + BALL_R >= PADDLE_Y &&

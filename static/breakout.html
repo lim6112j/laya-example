@@ -188,8 +188,14 @@ import {
   PADDLE_W, PADDLE_H, PADDLE_Y, BALL_R, ROW_COLORS,
   DEFAULT_CONFIG, QUESTION,
   createSim, startGame, aliveBricks, setBallSpeed, step, buildState,
-  rolloutReachable,
+  rolloutReachable, issueCommand, commandIsStale, measure,
 } from "/breakout_sim.js";
+// `axiom` is needed by the frame loop above, which lives in THIS module block. The page has
+// two <script type="module"> blocks and module scope does NOT cross between them — an import
+// added to the second block (where analyticReachable is imported) is invisible to code in
+// this one, and fails at runtime with "axiom is not defined" rather than at parse time.
+// `window.breakoutOntology` below is the deliberate bridge for the second block's own use.
+import { axiom } from "/breakout_ontology.js";
 
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
@@ -254,6 +260,27 @@ function frame(t) {
   const dt = Math.min((t - lastTime) / 1000, 0.033);
   lastTime = t;
   const autoplay = document.getElementById("autoplay").checked;
+
+  // The stale-command axiom, enforced. The model's answer is applied once per ask interval
+  // and re-applied every frame in between, so a ball that bounces mid-interval leaves the
+  // paddle driving toward the pre-bounce side for the rest of that interval. 38.8% of
+  // in-command reflections leave the held command pointing the wrong way, and correcting it
+  // is worth +9 score across 3 seeds against the real checkpoint — for no extra model call,
+  // because the fix re-derives from `measure()` over the live sim rather than asking again.
+  //
+  // `commandIsStale` already requires a bounce to have occurred since the command was
+  // issued, so this is a plain per-frame check; it is false on every frame of a ball that
+  // has not reflected.
+  //
+  // Gated on the axiom being present, not on a separate toggle: deleting
+  // `command-stale-on-bounce` in the TBox editor disables the fix, which is what "the axiom
+  // is declared but enforced by nothing" would look like if it were ever wrong.
+  if (axiom("command-stale-on-bounce") && commandIsStale(sim)) {
+    const m = measure(sim);
+    const dir = m.reachable === false ? 0 : (Math.abs(m.gap) <= 1 ? 0 : Math.sign(m.gap));
+    issueCommand(sim, dir);
+  }
+
   const ev = step(sim, dt, { keys: autoplay ? null : keys });
   if (ev.brickHit || ev.lost) {
     // `false` is the only verdict that earns the ontology credit. `null` — "no verdict
@@ -343,8 +370,12 @@ const MOVE_BAR_ORDER = ["left", "stay", "right"];
 
 function renderDecision(body) {
   const answer = body.result.answers.move;
+  // Record the command together with the landing point it was issued against, so the
+  // stale-command axiom can tell whether that target still exists. `issueCommand` rather
+  // than a bare assignment: the provenance is what makes the axiom checkable, and setting
+  // `paddleDir` alone would leave the command unassertable.
+  issueCommand(sim, answer.choice === "left" ? -1 : answer.choice === "right" ? 1 : 0);
   const choice = answer.choice;
-  sim.paddleDir = choice === "left" ? -1 : choice === "right" ? 1 : 0;
 
   const bars = document.getElementById("decisionBars");
   bars.innerHTML = "";

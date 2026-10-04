@@ -96,7 +96,10 @@ ball speed, and the model override selects the checkpoint.
 
 It also carries an **Ontology** panel — the same TBox editor and ABox view as the
 fleet demo — declaring one rule: `Ball ⊑ ≥1 catchableBy`, so a ball the physics
-cannot recover is a fact rather than a mistake. Off by default. The two counters
+cannot recover is a fact rather than a mistake. Off by default, and it does not
+raise the score: in this game unreachable balls are rare (1.7%–6.7% of questions,
+and that figure is a property of the demo's controller rather than of Breakout — see
+the bias sweep below). What it changes is the accounting. The two counters
 under the canvas split the loss into *provably lost* and *lost after a catchable
 ask*, which is the honest form of "the demo stops blaming the model for
 physics-impossible catches". See
@@ -612,11 +615,43 @@ deliberately does not report score as the headline:
   closed form disagrees with the rollout on 12.8% of states
 ```
 
-The suppression rate is genuinely low, and that is a fact about the game rather than a
-defect in the gate: the paddle crosses at 200 px/s while the ball falls the ~210 px in
-1.1–3 s, so it recovers from most bad positions before the ball escapes. Hopeless balls need
-the paddle already committed the wrong way. Measured across seeds 3/7/11 the rate runs
-1.7%–6.7%.
+**The suppression rate is low here, and the reason is the demo's controller — not the game.**
+An earlier version of this section said the opposite, and a sweep of the aim bias says that
+was wrong. Suppression rate against controller quality (600 decidable states, seed 7, the
+real `rolloutReachable`):
+
+```
+aim bias    unreachable    suppression
+    0 px            0            0.0%
+   40 px            3            0.5%
+   80 px           54            9.0%
+  120 px           90           15.0%
+  160 px          144           24.0%
+  200 px          192           32.0%
+  240 px          206           34.3%
+```
+
+The paddle crosses at 200 px/s while the ball falls the ~210 px in 1.1–3 s, so it recovers
+from most bad positions. A hopeless ball needs the paddle already committed the wrong way —
+and the demo's controller is mostly not, so the gate has little to close. **The 1.7%–6.7%
+quoted above is this curve's far left, i.e. a statement about the demo policy rather than
+about Breakout.** At a genuinely bad aim bias the gate suppresses a third of what it is asked.
+
+Two consequences, both of which cut against reading this as a performance win:
+
+* **Suppression is not free.** A suppressed ball gets no command, so the paddle holds still
+  and the cost lands on the *next* ball. Over the 192 suppressed balls at 200 px of bias, the
+  recovery distance the next ball inherits is a median of 124 px and a p90 of 267 px; 74% of
+  them need more than 80 px of travel to get back. The harness's "balls lost should be
+  ~unchanged" therefore means the gate's cost roughly cancels its benefit, not that there is
+  a benefit.
+* **There is no performance gain to collect.** The score did not move, and the thing a reader
+  would expect to be the real bug does not survive measurement either — see the wall-bounce
+  section below.
+
+The gate's value in this example is presentational and structural: it splits *provably lost*
+from *lost after a catchable ask*, so the demo stops attributing physics-impossible catches to
+the model, and it is the second domain proving the shared TBox/ABox core. It is not a speedup.
 
 Two measurement traps this harness hit and now guards against in its own comments, because
 both produced a clean sheet of zeros that meant nothing: generating scenarios with a
@@ -633,6 +668,49 @@ score — 25 seeded games with a perfect controller lost 1025 balls aiming at cu
 1025 aiming at the landing point. A paddle driving toward the landing point sweeps through
 the current x on the way. The gain is that the model is no longer *told* the wrong thing,
 which starts to matter the moment a controller commits to one side for a whole descent.
+
+**A wall-bounce fix that was proposed, measured, and rejected.** The paddle visibly misplays
+after the ball reflects off a side wall, and the obvious reading is that the demo should
+re-aim the instant `vx` flips — a *stale-command* axiom, `Command ⊑ ≤1 validUntil(x_next ≠
+x_goal)`, which is a temporal validity condition rather than a reachability one and would
+have gone into the TBox as an independent axis. It is worth recording that this was built and
+dropped, because the measurement is more useful than the axiom would have been.
+
+The premise checked out: with a 0.25 s hold, **25.3%** of in-command x-wall reflections leave
+the held command pointing at the wrong side. The conclusion did not. Re-aiming on reflection
+recovers **zero** of the lost balls:
+
+```
+lag      baseline (score / catchable losses)   re-aim, clamp expiry   re-aim, extend expiry
+0 s          606 /   0                             606 /   0              606 /   0
+0.125 s      491 /  36                             491 /  36              491 /  36
+0.25 s       380 /  60                             380 /  60              380 /  60
+```
+
+The upper bound is 0, and that is stronger than "it did not help": there is no reachable
+version of this change that catches more balls. The reason is that a reflection does not make
+a catchable ball uncatchable — at zero observation lag the catchable loss count is 0 before any
+of this. The gate is asking *which* ball to chase, and the losses come from *how often* the
+controller is allowed to change its mind. Note also that the first attempt made things clearly
+**worse** (491 → 330) by resetting the command expiry at the bounce, which held a stale command
+longer than the demo's own deadline; clamping to the original expiry removes the regression but
+not the absence of a gain.
+
+A related intuition is worth killing too, since it is the natural next guess: re-deriving the
+command every physics step instead of on a 0.25 s cadence scores **202 against the cadence's
+566**. `aimTarget` flips sign as the paddle crosses the landing point, so continuous
+re-aiming oscillates. In this game "update more often" is the wrong direction.
+
+**The remaining error is the cadence, not the information and not the walls.** The prediction
+the model is shown is already exact — over 334 asked-and-catchable states the gap between the
+reported `landingX` and where the ball is actually caught is a median of **0.2 px** (p90 0.2,
+max 3.7), and states where a reflection intervened are *not* worse (0.1 px mean) than states
+where none did. `buildLandingX` expands not-yet-happened reflections through the `reflectX`
+triangle wave, so a predicted bounce is already priced in. What is left is the 0.25 s hold:
+the paddle overshoots the target between asks, or has not yet finished crossing when the ball
+arrives. Both candidate fixes — a shorter ask interval (4× the model calls) or carrying a
+monotone target band into `buildState()` to damp the oscillation — are changes to the
+observation and the demo's cadence, not to the ontology. Neither was built.
 
 **Two modules, one shared core.** `breakout_ontology.js` is separate from `ontology.js`
 rather than a generalisation of it: the fleet reasoner has three hardcoded axiom ids the

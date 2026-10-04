@@ -96,13 +96,14 @@ ball speed, and the model override selects the checkpoint.
 
 It also carries an **Ontology** panel — the same TBox editor and ABox view as the
 fleet demo — declaring one rule: `Ball ⊑ ≥1 catchableBy`, so a ball the physics
-cannot recover is a fact rather than a mistake. Off by default, and it does not
-raise the score: in this game unreachable balls are rare (1.7%–6.7% of questions,
-and that figure is a property of the demo's controller rather than of Breakout — see
-the bias sweep below). What it changes is the accounting. The two counters
-under the canvas split the loss into *provably lost* and *lost after a catchable
+cannot recover is a fact rather than a mistake. Off by default, and to be clear: this
+particular axiom does **not** raise the score. In this game unreachable balls are rare
+(1.7%–6.7% of questions, and that figure is a property of the demo's controller rather
+than of Breakout — see the bias sweep below). What it changes is the accounting. The two
+counters under the canvas split the loss into *provably lost* and *lost after a catchable
 ask*, which is the honest form of "the demo stops blaming the model for
-physics-impossible catches". See
+physics-impossible catches". A different axiom — re-aiming on a wall bounce — is where
+the measurable gain in this example actually came from, and it is written up below. See
 [The same idea in Breakout](#the-same-idea-in-breakout--and-where-the-fleet-invariant-does-not-carry-over).
 
 ### laya runs the warehouse
@@ -645,18 +646,37 @@ Two consequences, both of which cut against reading this as a performance win:
   them need more than 80 px of travel to get back. The harness's "balls lost should be
   ~unchanged" therefore means the gate's cost roughly cancels its benefit, not that there is
   a benefit.
-* **There is no performance gain to collect.** The score did not move, and the thing a reader
-  would expect to be the real bug does not survive measurement either — see the wall-bounce
-  section below.
+* **The reachability gate itself does not pay, but a wall-bounce fix does.** The score did
+  not move when the gate opened or closed — suppression is roughly a wash either way. The one
+  measurable gain in this example came from somewhere a reviewer would not look: re-aiming the
+  paddle when the ball reflects off a side wall, which 38.8% of in-command reflections leave
+  pointing the wrong way. Clamped to the command's original expiry it wins **17 of 24 seeds**
+  for **+48 net score** and **−8 catchable losses**. That is a *stale-command* axiom rather
+  than a reachability one, and it is not built — see the wall-bounce section below for the
+  measurement, and for the harness bug that first reported it as worthless.
 
-The gate's value in this example is presentational and structural: it splits *provably lost*
-from *lost after a catchable ask*, so the demo stops attributing physics-impossible catches to
-the model, and it is the second domain proving the shared TBox/ABox core. It is not a speedup.
+The gate's own value in this example is presentational and structural: it splits *provably
+lost* from *lost after a catchable ask*, so the demo stops attributing physics-impossible
+catches to the model, and it is the second domain proving the shared TBox/ABox core. **It is
+not a speedup.**
 
 Two measurement traps this harness hit and now guards against in its own comments, because
 both produced a clean sheet of zeros that meant nothing: generating scenarios with a
 **perfect** paddle (every ball trivially catchable, nothing to suppress), and an aim bias too
 small to matter (unreachable rate 0.0% below ~60 px of bias).
+
+**Reproducing the measurements below.** Three scripts, no model server and no spend — the gate
+and the physics are pure functions, so every number in this section comes from the same code
+path the browser runs:
+
+```
+node tools/bias_sweep.mjs      # the suppression table, and what suppression costs
+node tools/stale_command.mjs   # the wall-bounce fix, per-lag and per-arm
+node tools/landing_accuracy.mjs # how exact the landing point handed to the model is
+```
+
+Each script's header records the trap that produced a wrong number the first time, since the
+mistakes are more reusable than the results.
 
 **The observation changed too, and it was wrong before.** `buildState()` compared the
 paddle to the ball's *current* x. The ball drifts and reflects on the way down, so over
@@ -669,48 +689,66 @@ score — 25 seeded games with a perfect controller lost 1025 balls aiming at cu
 the current x on the way. The gain is that the model is no longer *told* the wrong thing,
 which starts to matter the moment a controller commits to one side for a whole descent.
 
-**A wall-bounce fix that was proposed, measured, and rejected.** The paddle visibly misplays
-after the ball reflects off a side wall, and the obvious reading is that the demo should
-re-aim the instant `vx` flips — a *stale-command* axiom, `Command ⊑ ≤1 validUntil(x_next ≠
-x_goal)`, which is a temporal validity condition rather than a reachability one and would
-have gone into the TBox as an independent axis. It is worth recording that this was built and
-dropped, because the measurement is more useful than the axiom would have been.
+**A wall-bounce fix: the one thing here that actually pays.** The paddle visibly misplays
+after the ball reflects off a side wall, and the reading is that the demo should re-aim the
+instant `vx` flips — a *stale-command* axiom, `Command ⊑ ≤1 validUntil(x_next ≠ x_goal)`, a
+temporal validity condition rather than a reachability one, which would go into the TBox as an
+independent axis. The premise checks out: with a 0.25 s hold, **38.8%** of in-command x-wall
+reflections leave the held command pointing at the wrong side.
 
-The premise checked out: with a 0.25 s hold, **25.3%** of in-command x-wall reflections leave
-the held command pointing at the wrong side. The conclusion did not. Re-aiming on reflection
-recovers **zero** of the lost balls:
+It works. Re-aiming on the bounce, clamped to the original expiry so the command cannot
+outlive its own deadline, catches **8 more balls** across 24 seeds and wins **17 of 24**:
 
 ```
-lag      baseline (score / catchable losses)   re-aim, clamp expiry   re-aim, extend expiry
-0 s          606 /   0                             606 /   0              606 /   0
-0.125 s      491 /  36                             491 /  36              491 /  36
-0.25 s       380 /  60                             380 /  60              380 /  60
+lag      off (the demo)   re-aim, clamp expiry   re-aim, extend expiry
+0 s          606 /   0            698 /   0            698 /   0
+0.125 s      491 /  36            551 /  42            551 /  42
+0.25 s       380 /  60            432 /  52            432 /  52
 ```
 
-The upper bound is 0, and that is stronger than "it did not help": there is no reachable
-version of this change that catches more balls. The reason is that a reflection does not make
-a catchable ball uncatchable — at zero observation lag the catchable loss count is 0 before any
-of this. The gate is asking *which* ball to chase, and the losses come from *how often* the
-controller is allowed to change its mind. Note also that the first attempt made things clearly
-**worse** (491 → 330) by resetting the command expiry at the bounce, which held a stale command
-longer than the demo's own deadline; clamping to the original expiry removes the regression but
-not the absence of a gain.
+Per-seed at 0.25 s of lag, `node tools/stale_command.mjs`: **+48 net score, −8 catchable
+losses, 17 wins / 7 losses / 0 ties.** That is the first measurable performance gain this
+example has produced, and it comes from the one place a reviewer would not look — not from the
+reachability gate.
+
+**Two corrections to what this section claimed before, both from the same bug.** An earlier
+version here reported the upper bound as 0 and the fix as rejected. That was wrong, and the
+measurement harness was the cause: it detected the reflection by comparing `vx` *before* the
+`step()` that produces it, so the branch never fired and all three arms returned identical
+numbers — which read exactly like "the fix does nothing." The three-way tie was the tell; it
+should have been read as instrumentation that could not distinguish the arms. Two lessons worth
+keeping:
+
+* **A tie between arms that should differ is a broken instrument, not a null result.** The
+  first version of this fix was reported as making things *worse* (491 → 330), which was also
+  an artifact — the same fire-and-forget branch, plus resetting the command expiry at the
+  bounce, which held a stale command past the demo's deadline. Clamping to the original expiry
+  is what makes it work.
+* **The "no version of this change helps" argument was sound reasoning on a broken premise.**
+  The claim rested on a reflection never making a catchable ball uncatchable — true, and
+  irrelevant, because the mechanism is not that the reflection costs a catch. It is that the
+  paddle was already committed the wrong way *before* the reflection and stayed committed
+  after it. The ball remains catchable; the controller had simply stopped trying.
 
 A related intuition is worth killing too, since it is the natural next guess: re-deriving the
 command every physics step instead of on a 0.25 s cadence scores **202 against the cadence's
-566**. `aimTarget` flips sign as the paddle crosses the landing point, so continuous
-re-aiming oscillates. In this game "update more often" is the wrong direction.
+380**. `aimTarget` flips sign as the paddle crosses the landing point, so continuous
+re-aiming oscillates. In this game "update more often" is the wrong direction — the fix is
+re-aiming *on the event*, which is rare, not on a shorter clock, which is constant.
 
-**The remaining error is the cadence, not the information and not the walls.** The prediction
-the model is shown is already exact — over 334 asked-and-catchable states the gap between the
-reported `landingX` and where the ball is actually caught is a median of **0.2 px** (p90 0.2,
-max 3.7), and states where a reflection intervened are *not* worse (0.1 px mean) than states
-where none did. `buildLandingX` expands not-yet-happened reflections through the `reflectX`
-triangle wave, so a predicted bounce is already priced in. What is left is the 0.25 s hold:
-the paddle overshoots the target between asks, or has not yet finished crossing when the ball
-arrives. Both candidate fixes — a shorter ask interval (4× the model calls) or carrying a
-monotone target band into `buildState()` to damp the oscillation — are changes to the
-observation and the demo's cadence, not to the ontology. Neither was built.
+**What remains after the bounce fix.** The prediction the model is shown is already exact —
+over 334 asked-and-catchable states the gap between the reported `landingX` and where the ball
+is actually caught is a median of **0.2 px** (p90 0.2, max 3.7), and states where a reflection
+intervened are *not* worse (0.1 px mean) than states where none did. `buildLandingX` expands
+not-yet-happened reflections through the `reflectX` triangle wave, so a predicted bounce is
+already priced in — which is exactly why reacting to the bounce adds +48: the model does not
+get the update for free, it just gets told the truth and still waits 0.25 s to act on it. What
+is left is the cadence and the swing past the target. Both candidate fixes — a shorter ask
+interval (4× the model calls) or a monotone target band in `buildState()` to damp the
+oscillation — are changes to the observation and the demo's cadence, not to the ontology.
+Neither was built. The stale-command axiom itself is also unbuilt: these numbers are from a
+simulated controller with a held command, not from the model answering, so the honest next step
+is the A/B in `eval_breakout.mjs` with the axiom wired in.
 
 **Two modules, one shared core.** `breakout_ontology.js` is separate from `ontology.js`
 rather than a generalisation of it: the fleet reasoner has three hardcoded axiom ids the

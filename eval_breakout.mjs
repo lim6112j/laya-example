@@ -328,11 +328,17 @@ for (const [label, fn] of [
 console.log(`\n  the gate suppresses ${off["ontology-on"].suppressed} of ${scenarios.length} ` +
             `questions (${pct(off["ontology-on"].suppressed / scenarios.length)}). ` +
             `That is the whole effect, and it is the number to argue about.`);
-console.log(`  A low rate here is a fact about the game, not a defect in the gate: the paddle`);
-console.log(`  crosses 200px/s while the ball falls the ~210px to the paddle in 1.1-3s, so it`);
-console.log(`  recovers from most bad positions before the ball can get away. Hopeless balls`);
-console.log(`  need the paddle already committed the wrong way. Measured across seeds 3/7/11`);
-console.log(`  the rate runs 1.7%-6.7%; the spread is the per-seed aim bias, not sampling noise.`);
+console.log(`  A low rate here is a fact about this harness's controller, NOT about Breakout:`);
+console.log(`  the paddle crosses 200px/s while the ball falls the ~210px to the paddle in`);
+console.log(`  1.1-3s, so it recovers from most bad positions before the ball can get away, and`);
+console.log(`  hopeless balls need the paddle already committed the wrong way. Sweeping the aim`);
+console.log(`  bias (node tools/bias_sweep.mjs) gives 0.0% at no bias, 9.0% at 80px, 32.0% at`);
+console.log(`  200px — so this number measures the policy, and a low one is not evidence that`);
+console.log(`  the gate does little. Measured across seeds 3/7/11 the rate runs 1.7%-6.7%;`);
+console.log(`  that spread is the per-seed aim bias, not sampling noise.`);
+console.log(`  Note also that suppression is not free: a suppressed ball gets no command, so`);
+console.log(`  the paddle holds and the cost lands on the NEXT ball (median 124px of extra`);
+console.log(`  recovery). "Balls lost ~unchanged" therefore means cost roughly cancels benefit.`);
 
 console.log(`\n=== gate cost, against the real physics ===`);
 const cost = gateCost(scenarios);

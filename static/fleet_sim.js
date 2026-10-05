@@ -22,6 +22,7 @@
 // the two cannot form a cycle, and swapping the predicate is opt-in.
 
 import { canServe as ontologyCanServe } from "./ontology.js";
+import { mulberry32 } from "./rng.js";
 
 export const GRID = 50;
 
@@ -60,17 +61,9 @@ export const busPos = bus => ({ x: bus.x, y: bus.y });
 
 // ---- seeded rng --------------------------------------------------------------
 
-/** Deterministic RNG, so a scenario replays identically across runs and arms. */
-export function mulberry32(seed) {
-  let a = seed >>> 0;
-  return function () {
-    a = (a + 0x6D2B79F5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
+// Re-exported so `test_fleet_sim.mjs` and anything else importing it from here keeps
+// resolving; the implementation moved to rng.js to be shared with breakout_sim.js.
+export { mulberry32 } from "./rng.js";
 
 // ---- simulation state --------------------------------------------------------
 

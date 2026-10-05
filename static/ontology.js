@@ -18,6 +18,19 @@
 // claim the domain guarantees something it does not. Axioms are for what must always hold;
 // configuration is for what we currently choose. See TBOX for the split.
 
+import { checkTBox as coreCheckTBox } from "./ontology_core.js";
+
+// The domain-free machinery — checkTBox, describeAxiom, addAxiom, removeAxiom, resetTBox,
+// tboxStatus, el — lives in ontology_core.js now that a second domain needs it too. It is
+// re-exported below under its original names so test_ontology.mjs and eval_rules.mjs
+// import from exactly where they did before the split.
+//
+// WHAT DID NOT MOVE, AND WHY. `IMPLEMENTED_FORMS` stays here, per domain, and `checkTBox`
+// is called through a one-argument wrapper that supplies it. Making the list global is
+// tempting — both domains happen to implement the same four forms — and wrong: a form
+// fleet's reasoner handles would then be accepted by breakout's checkTBox and enforced by
+// nothing, which is precisely the hole commit a5149d0 closed.
+
 // ---- vocabulary ---------------------------------------------------------------
 // Declared, not derived. These are the only class names the axioms may reference.
 
@@ -101,6 +114,14 @@ export const IMPLEMENTED_FORMS = ["maxCardinality", "minCardinality", "range", "
 // ---- TBox self-check ----------------------------------------------------------
 
 /**
+ * Re-exported so every existing importer keeps resolving from `ontology.js`.
+ *
+ * `checkTBox` is NOT here: it is wrapped above, because core's version takes the domain's
+ * IMPLEMENTED_FORMS as a second argument and this one supplies it from this module.
+ */
+export { describeAxiom } from "./ontology_core.js";
+
+/**
  * Is the axiom set itself coherent? Reports classes it cannot satisfy.
  *
  * This is a capability the hand-written path does not have: `seats: 4` cannot contradict
@@ -108,61 +129,14 @@ export const IMPLEMENTED_FORMS = ["maxCardinality", "minCardinality", "range", "
  * and the honest report is that the class is unsatisfiable rather than that one of the two
  * assertions is more correct than the other.
  *
+ * A thin wrapper over `ontology_core.js`'s domain-free version, binding this domain's
+ * IMPLEMENTED_FORMS. The default argument keeps `checkTBox()` meaning "check the shipped
+ * TBox", which is what every existing call site means.
+ *
  * Returns {satisfiable: bool, unsatisfiable: [{id, reason}]}.
  */
 export function checkTBox(tbox = TBOX) {
-  const unsatisfiable = [];
-
-  // An axiom in a form nothing implements. Reported first, because it is the failure that
-  // hides the others: an unimplemented axiom is not merely unevaluated, it makes the whole
-  // set untrustworthy — `satisfiable: true` here would be a claim that the declared rules
-  // hold, when some of them are never consulted. Reject rather than warn, so the live
-  // editor cannot save a TBox that reads as enforced and is not.
-  for (const a of tbox) {
-    if (IMPLEMENTED_FORMS.includes(a.form)) continue;
-    unsatisfiable.push({
-      id: a.id,
-      reason: `form "${a.form}" is not implemented: no reasoner implements it, so this ` +
-              `axiom would be declared and never evaluated. Add it to IMPLEMENTED_FORMS ` +
-              `and give reason() a case for it.`,
-    });
-  }
-
-  // Contradictory cardinality on the same (subject, property) pair.
-  const bySlot = new Map();
-  for (const a of tbox) {
-    if (a.form !== "maxCardinality" && a.form !== "minCardinality") continue;
-    const slot = `${a.subject}.${a.property}`;
-    if (!bySlot.has(slot)) bySlot.set(slot, []);
-    bySlot.get(slot).push(a);
-  }
-  for (const [slot, group] of bySlot) {
-    const maxes = group.filter(a => a.form === "maxCardinality");
-    const mins = group.filter(a => a.form === "minCardinality");
-    const hi = mins.length ? Math.max(...mins.map(a => a.value)) : -Infinity;
-    const lo = maxes.length ? Math.min(...maxes.map(a => a.value)) : Infinity;
-    if (hi > lo) {
-      unsatisfiable.push({
-        id: group.map(a => a.id).join(" + "),
-        reason: `${slot}: requires at least ${hi} and at most ${lo} — no value satisfies both`,
-      });
-    }
-  }
-
-  // A class declared disjoint from itself, or from a class it must be a member of.
-  for (const a of tbox) {
-    if (a.form === "disjoint") {
-      const seen = new Set();
-      for (const c of a.value) {
-        if (seen.has(c)) {
-          unsatisfiable.push({ id: a.id, reason: `disjoint axiom lists ${c} twice` });
-        }
-        seen.add(c);
-      }
-    }
-  }
-
-  return { satisfiable: unsatisfiable.length === 0, unsatisfiable };
+  return coreCheckTBox(tbox, IMPLEMENTED_FORMS);
 }
 
 // ---- ABox: facts about one decision --------------------------------------------

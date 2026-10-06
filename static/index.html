@@ -132,6 +132,7 @@
           <option value="english">english</option>
           <option value="multilingual">multilingual</option>
           <option value="typed-decisions">typed-decisions</option>
+          <option value="jev">jev (OpenRouter — slow, costs money)</option>
         </select>
       </div>
       <div style="margin-top: 12px;">
@@ -741,7 +742,8 @@ function answerCard(qid, answer) {
     }));
     card.appendChild(meter);
   }
-  const metaParts = [`confidence ${answer.confidence}`];
+  const metaParts = [];
+  if (answer.confidence !== undefined) metaParts.push(`confidence ${answer.confidence}`);
   if (answer.answer_confidence !== undefined) {
     metaParts.push(`answer_confidence ${answer.answer_confidence}`);
   }
@@ -761,7 +763,10 @@ function renderResult(body) {
     results.appendChild(el("p", { class: "empty", text: "No answers returned." }));
   }
 
-  const routing = body.result && body.result.routing;
+  // laya nests routing inside result; the jev branch returns it at the top level.
+  const routing = (body.routing !== undefined && body.routing !== null)
+    ? body.routing
+    : (body.result && body.result.routing);
   const routingPanel = document.getElementById("routingPanel");
   if (routing) {
     routingPanel.style.display = "";
@@ -776,6 +781,10 @@ function renderResult(body) {
     if (routing.reason) {
       box.appendChild(el("div", {},
         [el("strong", { text: "reason: " }), document.createTextNode(routing.reason)]));
+    }
+    // Jev reports what the call cost; laya returns nothing because it runs locally.
+    if (body.result && body.result.cost_usd) {
+      box.appendChild(el("div", { class: "meta", text: `cost: $${body.result.cost_usd.toFixed(6)}` }));
     }
     box.appendChild(el("div", { class: "meta", text: `latency: ${body.latency_ms} ms` }));
   }

@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 180 node eval_rules.mjs)",
+      "Bash(timeout 120 node test_ontology.mjs)"
+    ]
+  }
+}

@@ -188,7 +188,9 @@ export const el = (tag, props = {}, ...kids) => {
  *   notes(sim)        -> [{ok, text}] — domain lines shown under the consistency check
  *                        (fleet's seat/TBox agreement check; breakout's decidable band)
  *   enforceChecked(sim) / setEnforce(sim, on)
- *   note              the paragraph explaining what the toggle does and does not promise
+ *                     OPTIONAL — omit both and no toggle is rendered, for domains
+ *                     (breakout) whose enforcement switch lives outside the panel.
+ *   note              the paragraph explaining what enforcement does and does not promise
  *   onChange(what)    called after every mutation, and after the enforce toggle
  *
  * The editor is created ONCE and mutated in place, so `rerender()` never rebuilds the
@@ -315,15 +317,19 @@ export function mountTBoxEditor({ root, adapter }) {
                 aboxHost);
     refreshABox();
 
-    // --- enforcement toggle
-    const toggle = el("input", { type: "checkbox" });
-    toggle.checked = !!enforceChecked(sim);
-    toggle.addEventListener("change", () => {
-      setEnforce(sim, toggle.checked);
-      onChange(toggle.checked ? "enforce" : "unenforce");
-    });
-    root.append(el("div", { className: "axenforce" }, toggle,
-      el("label", { textContent: adapter.enforceLabel })));
+    // --- enforcement toggle, ONLY when the domain has one. Breakout drives enforcement
+    // from a button in its own Controls row instead, and an adapter without
+    // `enforceChecked` must not render a second, competing switch here.
+    if (enforceChecked) {
+      const toggle = el("input", { type: "checkbox" });
+      toggle.checked = !!enforceChecked(sim);
+      toggle.addEventListener("change", () => {
+        setEnforce(sim, toggle.checked);
+        onChange(toggle.checked ? "enforce" : "unenforce");
+      });
+      root.append(el("div", { className: "axenforce" }, toggle,
+        el("label", { textContent: adapter.enforceLabel })));
+    }
     root.append(el("div", { className: "axnote", textContent: note }));
 
     root.append(el("div", { className: "axreset" },

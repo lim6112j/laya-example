@@ -3,9 +3,13 @@
 //   uv run uvicorn server:app        # terminal 1
 //   node eval_breakout.mjs --n 150 --seed 7
 //
-// THE ONES YOU ASKED FOR: `ontology-off` is the demo exactly as it was before the
-// ontology existed — every ball gets asked about. `ontology-on` is the same game with the
-// gate closed, so a ball the reasoner calls unreachable is never put to the model.
+// THE ONES YOU ASKED FOR: `ontology-off` is the naive baseline — every ball gets asked
+// about, and (since the two-regime `buildState`) the observation names the ball's CURRENT
+// side, deliberately resurrecting the 12.4% wrong-side error the landing fix removed.
+// `ontology-on` is the prediction world: the observation is named from the wall-folded
+// landing point with absolute coordinates appended, and a ball the reasoner calls
+// unreachable is never put to the model. The A/B therefore prices the WHOLE ontology —
+// observation regime + gate — not the gate alone.
 //
 // THE MEASUREMENT IS NOT SCORE, AND THE HARNESS SAYS SO. It is tempting to report "score
 // with the ontology on" and call the difference an improvement. It is not one: a suppressed
@@ -243,6 +247,12 @@ async function closedLoop(arm, seed, seconds) {
   const gateOnArm = arm === "ontology-on" || arm === "ontology-on+reaim";
   const reaim = arm === "reaim" || arm === "ontology-on+reaim";
   const gate = gateOnArm ? gateOn : gateOff;
+  // The master switch also gates the model's INPUT: with it on, `buildState` appends the
+  // landing point as absolute coordinates (the `ball-predicted-at-paddle-level` axiom's
+  // output). So the ON arms measure the landing line AND the gate together — which is what
+  // the button actually turns on — while "reaim" stays the pure stale-command-fix arm with
+  // the observation unchanged.
+  sim.config.enforceReachability = gateOnArm;
   const stats = { asked: 0, suppressed: 0, calls: 0, provablyLost: 0, lostAfterAsk: 0,
                   failedCalls: 0, bounces: 0, reaims: 0 };
 

@@ -134,6 +134,7 @@
       <div class="controls">
         <button id="startBtn" class="primary">Start / Restart</button>
         <button id="pauseBtn">Pause</button>
+        <button id="ontologyBtn">Ontology: on</button>
         <span class="ctl"><input type="checkbox" id="autoplay" checked>
           <label for="autoplay">CJet autoplay <span style="color:var(--muted)">(off = arrow keys)</span></label></span>
         <span class="ctl"><label>Model</label>
@@ -272,10 +273,10 @@ function frame(t) {
   // issued, so this is a plain per-frame check; it is false on every frame of a ball that
   // has not reflected.
   //
-  // Gated on the axiom being present, not on a separate toggle: deleting
-  // `command-stale-on-bounce` in the TBox editor disables the fix, which is what "the axiom
-  // is declared but enforced by nothing" would look like if it were ever wrong.
-  if (axiom("command-stale-on-bounce") && commandIsStale(sim)) {
+  // Gated on the master switch AND the axiom being present. Turning the Ontology button
+  // off disables the fix, as does deleting `command-stale-on-bounce` in the TBox editor —
+  // either way the ontology has stopped asserting it, so nothing steers on it.
+  if (sim.config.enforceReachability && axiom("command-stale-on-bounce") && commandIsStale(sim)) {
     const m = measure(sim);
     const dir = m.reachable === false ? 0 : (Math.abs(m.gap) <= 1 ? 0 : Math.sign(m.gap));
     issueCommand(sim, dir);
@@ -427,6 +428,15 @@ document.getElementById("startBtn").addEventListener("click", () => {
 document.getElementById("pauseBtn").addEventListener("click", function () {
   sim.paused = !sim.paused;
   this.textContent = sim.paused ? "Resume" : "Pause";
+});
+// The ontology's single switch. On: it judges and its verdicts control (question
+// suppression + the stale-command fix). Off: it controls nothing — questions always go
+// out and the paddle obeys the raw answers. The state lives in sim.config, and sim is
+// never recreated (startGame mutates it), so the choice survives Start / Restart.
+document.getElementById("ontologyBtn").addEventListener("click", function () {
+  sim.config.enforceReachability = !sim.config.enforceReachability;
+  this.textContent = sim.config.enforceReachability ? "Ontology: on" : "Ontology: off";
+  document.getElementById("decisionMeta").textContent = "no decisions yet";
 });
 document.getElementById("autoplay").addEventListener("change", function () {
   document.getElementById("autoplayBadge").className =

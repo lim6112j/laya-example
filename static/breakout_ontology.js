@@ -42,7 +42,8 @@ export const VOCABULARY = {
   // coordinate it was issued against no longer exists. See `command-stale-on-bounce`.
   classes: ["Ball", "Paddle", "GridCell", "Ascending", "Descending", "Caught", "Lost",
             "Left", "Stay", "Right", "Command", "Stale"],
-  properties: ["position", "catchableBy", "commanded", "state", "issuedFor", "validUntil"],
+  properties: ["position", "catchableBy", "commanded", "state", "issuedFor", "validUntil",
+               "predictedPosition"],
   // A ball's lifecycle states are mutually exclusive. `Ball` itself is a thing, not a
   // state; the four below are the four mutually exclusive ones.
   states: ["Ascending", "Descending", "Caught", "Lost"],
@@ -63,6 +64,20 @@ export const TBOX = [
     comment: "Tier 0. A descending ball below the bricks that no paddle command reaches. " +
              "The verdict comes from the physics rollout in breakout_sim.js, injected — " +
              "this axiom declares that the answer exists, not how to compute it.",
+  },
+  {
+    id: "ball-predicted-at-paddle-level",
+    form: "minCardinality",
+    subject: "Ball",
+    property: "predictedPosition",
+    value: 1,
+    comment: "A ball that will reach paddle height has a predictable position when it " +
+             "gets there. Computed from the CURRENT ball position by the physics " +
+             "rollout (`buildLandingX`, with side-wall folding), injected exactly like " +
+             "reachability — the axiom declares that the prediction exists and is part " +
+             "of what the ontology says, not an ad-hoc read of the sim. Same injection " +
+             "style as `ball-must-be-catchable`: cost is not logic, and a second " +
+             "implementation of the landing point would be a second thing to get wrong.",
   },
   {
     id: "command-stale-on-bounce",
@@ -168,6 +183,14 @@ export function buildABox(sim, opts = {}) {
     // assertion that failed.
     gap: m.gap,
     timeToContact: m.timeToContact,
+    // The `ball-predicted-at-paddle-level` output: where the ball WILL BE when it reaches
+    // paddle height (centre y = BAND_ENTER_Y, the same instant `buildLandingX` solves
+    // for), folded through the side walls. Asserted only where a prediction CAN be made —
+    // outside the decidable band it is null, and the reasoner treats that the same way it
+    // treats an indeterminate reachability verdict: no claim, not a violation.
+    predictedPosition: decidable(sim.ball)
+      ? { x: Math.round(buildLandingX(sim.ball)), y: BAND_ENTER_Y }
+      : null,
   });
 
   add("paddle", "Paddle", {
@@ -276,6 +299,34 @@ export function reason(facts, { extensions = {} } = {}) {
           detail: `the command was issued for a ball landing to the ${ind.issuedFor} of the paddle, ` +
             `but the ball has since reflected off a side wall and now lands to the ` +
             `${ind.nowSide} — the paddle is steering toward a trajectory that no longer exists`,
+        });
+      }
+    }
+  }
+
+  // minCardinality: Ball ⊑ ≥1 predictedPosition, wherever a prediction can be made.
+  //
+  // The third existential restriction, and the one that GIVES something rather than
+  // forbidding something: it is what makes the landing point the ontology's declared
+  // output instead of an ad-hoc read of the sim. `buildABox` asserts the prediction for
+  // every decidable ball, so a violation here is not a judgement about the ball — it is
+  // buildABox and this check disagreeing, which is a real bug worth surfacing. Same
+  // deletion contract as the other two existential restrictions: removing it in the live
+  // editor stops the assertion and is reported, not crashed on.
+  const predicted = axiom("ball-predicted-at-paddle-level");
+  if (!predicted) {
+    unasserted.push("ball-predicted-at-paddle-level");
+  } else {
+    for (const [id, ind] of facts.individuals) {
+      if (ind.type !== "Ball") continue;
+      // Outside the decidable band no prediction CAN be made, so nothing is owed — the
+      // same skip an indeterminate ball gets from the reachability check.
+      if (ind.indeterminate) continue;
+      if (ind.predictedPosition == null) {
+        violations.push({
+          axiom: predicted.id,
+          subject: id,
+          detail: "the ball will reach paddle height, but no predicted position is asserted",
         });
       }
     }

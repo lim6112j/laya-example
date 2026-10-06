@@ -19,8 +19,12 @@ import {
   W, H, PADDLE_Y, PADDLE_SPEED, PADDLE_MIN, PADDLE_MAX, BALL_R, BALL_MIN_X,
   BAND_ENTER_Y, LAST_BRICK_BOTTOM, CATCH_TOL_PX,
   createSim, startGame, step, measure, aimTarget, decidable, rolloutReachable,
-  buildLandingX, issueCommand, commandIsStale,
+  buildLandingX, issueCommand, commandIsStale, DEFAULT_CONFIG,
 } from "./static/breakout_sim.js";
+// `shouldAsk` is the decision loop's view of the ontology gate. It lives in the panel
+// adapter (which node can import — the DOM is all inside functions), and the master-switch
+// tests below pin it from the outside, the way the HTML consumes it.
+import { shouldAsk } from "./static/breakout_panel.js";
 
 /** The simulation timestep the harnesses use; kept in one place so tests match them. */
 const DT_TEST = 1 / 240;
@@ -182,6 +186,67 @@ test("canCatch takes an injected rollout, so the boundary is testable without ph
   assert.equal(r.ok, false);
   const r2 = canCatch(sim, { rollout: () => true });
   assert.equal(r2.ok, true);
+});
+
+// ---- the predicted-position axiom -------------------------------------------------
+
+test("the predicted position is the landing point, at the height the prediction solves for", () => {
+  // `buildLandingX` solves for the instant the ball's CENTRE crosses BAND_ENTER_Y, so that
+  // is the y the prediction must assert — asserting PADDLE_Y would be the paddle's cell,
+  // not the ball's.
+  const sim = scene({ ball: { x: 300, y: 200, vx: 90, vy: 160 } });
+  assert.equal(decidable(sim.ball), true);
+  const facts = buildABox(sim);
+  assert.deepEqual(facts.individuals.get("ball").predictedPosition,
+    { x: Math.round(buildLandingX(sim.ball)), y: BAND_ENTER_Y });
+});
+
+test("a ball outside the decidable band asserts no prediction, and that is not a violation", () => {
+  // Rising: no prediction CAN be made, so nothing is owed — the same skip an
+  // indeterminate ball gets from the reachability check.
+  const sim = scene({ ball: { x: 460, y: 200, vx: 0, vy: -160 } });
+  const facts = buildABox(sim);
+  assert.equal(facts.individuals.get("ball").predictedPosition, null);
+  const r = reason(facts);
+  assert.equal(r.violations.filter(v => v.axiom === "ball-predicted-at-paddle-level").length, 0);
+});
+
+test("a decidable ball with no asserted prediction is a violation — the axiom is real", () => {
+  // buildABox asserts the prediction for every decidable ball, so this can only fire if
+  // buildABox and the reasoner disagree — a bug worth surfacing, not a judgement.
+  const sim = scene();
+  const facts = buildABox(sim);
+  delete facts.individuals.get("ball").predictedPosition;
+  const r = reason(facts);
+  assert.ok(r.violations.some(v => v.axiom === "ball-predicted-at-paddle-level"));
+});
+
+test("deleting the prediction axiom stops the assertion and says so", () => {
+  const sim = scene();
+  const i = TBOX.findIndex(a => a.id === "ball-predicted-at-paddle-level");
+  const [removed] = TBOX.splice(i, 1);
+  try {
+    const r = reason(buildABox(sim));
+    assert.ok(r.unasserted.includes("ball-predicted-at-paddle-level"));
+    assert.equal(r.violations.some(v => v.axiom === "ball-predicted-at-paddle-level"), false);
+    // The physics still knows where the ball lands — deleting a declaration does not
+    // delete the world, the same as the reachability demonstration above.
+    assert.equal(buildLandingX(sim.ball), measure(sim).landingX);
+  } finally {
+    TBOX.splice(i, 0, removed);
+  }
+});
+
+// ---- the master switch ------------------------------------------------------------
+
+test("the master switch: enforcement off means every question is asked", () => {
+  assert.equal(DEFAULT_CONFIG.enforceReachability, true,
+    "the demo ships with the ontology on, because judging is what it is for");
+  const unreachable = scene({ paddleX: 60, ball: { x: 460, y: 320, vx: 0, vy: 160 } });
+  assert.equal(canCatch(unreachable).ok, false, "sanity: with the switch on, this is suppressed");
+  // Off, the gate is inert no matter what the ontology would say — this sim shape is the
+  // one `shouldAsk` would suppress, so it is the one that proves the switch wins.
+  assert.equal(shouldAsk({ config: { enforceReachability: false } }), true);
 });
 
 test("buildABox reads the same measure() the prose does", () => {

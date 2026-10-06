@@ -1,8 +1,12 @@
 // The Breakout ontology panel — a domain adapter over the shared editor in
 // ontology_core.js. The same file, structurally, as ontology_panel.js is for fleet; what
-// differs is the vocabulary, the ABox row, and — importantly — the promise the toggle makes.
+// differs is the vocabulary, the ABox row, and where enforcement lives. Fleet keeps an
+// enforce checkbox in the panel; breakout does NOT — enforcement is the "Ontology: on/off"
+// button in breakout.html's Controls row, one switch with one principle: when the ontology
+// judges, its verdicts control; when it is off, it controls nothing. A panel-side checkbox
+// would be a second, competing switch, so the adapter simply does not provide one.
 //
-// READ THE `note` STRING BEFORE CHANGING THE TOGGLE. fleet's says enforcement "should not
+// READ THE `note` STRING BEFORE CHANGING ENFORCEMENT. fleet's says enforcement "should not
 // change any decision", which holds there by construction. It CANNOT hold here, and
 // claiming it would be false: once the ball is provably gone, left/stay/right has no
 // correct answer, so the option set IS the question. Gating it necessarily changes what is
@@ -49,14 +53,11 @@ export function mountBreakoutPanel({ root, getSim, onChange }) {
             : "no verdict for this ball — outside the decidable band, so nothing is enforced",
         }];
       },
-      enforceLabel: " suppress questions the ontology says are hopeless",
-      enforceChecked: sim => !!sim.config.enforceReachability,
-      // The toggle does not change any arithmetic. It changes whether the QUESTION is asked,
-      // which is the difference fleet does not have — see the header.
-      setEnforce: (sim, on) => { sim.config.enforceReachability = on; },
-      note: "Off (the default) this demo asks CJet about every ball, exactly as it always " +
-            "has — the ontology still shows its verdict, it just does not gate anything. " +
-            "Unlike the fleet demo, turning this on IS a behaviour change: when the ball is " +
+      note: "Enforcement is controlled by the 'Ontology: on/off' button in the Controls " +
+            "row, not by anything in this panel — one switch, one principle: when the " +
+            "ontology judges, its verdicts control (question suppression + the " +
+            "stale-command fix); when it is off, it controls nothing and CJet is asked " +
+            "about every ball. Turning it on IS a behaviour change: when the ball is " +
             "provably unreachable there is no correct answer among left/stay/right, so " +
             "suppressing the question changes what is asked. What it must never do is " +
             "suppress a question whose answer could have mattered. That is checked " +

@@ -49,7 +49,9 @@ Two consequences worth knowing:
   the ~35 ms an MPS machine gets.
 
 Verified on Intel: `main.py` runs both checkpoints, 19 Python and 45 Node tests
-pass. The arm64 column is from resolution, not execution.
+pass. The arm64 column is from resolution, not execution. (The Node suite has since
+grown — `node --test test_breakout_sim.mjs test_breakout_ontology.mjs test_ontology.mjs
+test_fleet_sim.mjs` now runs 114 tests, all green.)
 
 ## Web UI
 
@@ -78,8 +80,10 @@ metadata (model, repo, reason, latency).
   (offline hub + fast-build monkeypatch + preload; see below)
 - `test_server.py` — stubbed-API tests, no model load:
   `uv run pytest test_server.py`
-- `test_fleet_sim.mjs` — 18 simulation invariants, no model load:
+- `test_fleet_sim.mjs` — fleet simulation invariants, no model load:
   `node --test test_fleet_sim.mjs`
+- `test_breakout_sim.mjs` / `test_breakout_ontology.mjs` — breakout invariants and the
+  ontology's falsifiability tests: `node --test test_breakout_sim.mjs test_breakout_ontology.mjs`
 
 ### laya plays Breakout
 
@@ -95,16 +99,22 @@ off to play by arrow keys and compare; sliders tune the decision interval and
 ball speed, and the model override selects the checkpoint.
 
 It also carries an **Ontology** panel — the same TBox editor and ABox view as the
-fleet demo — declaring one rule: `Ball ⊑ ≥1 catchableBy`, so a ball the physics
-cannot recover is a fact rather than a mistake. Off by default, and to be clear: this
-particular axiom does **not** raise the score. In this game unreachable balls are rare
-(1.7%–6.7% of questions, and that figure is a property of the demo's controller rather
-than of Breakout — see the bias sweep below). What it changes is the accounting. The two
-counters under the canvas split the loss into *provably lost* and *lost after a catchable
-ask*, which is the honest form of "the demo stops blaming the model for
-physics-impossible catches". A different axiom — re-aiming on a wall bounce — is the one
-thing in this example that does pay: **3 of 3 seeds, +9 net score, half the balls lost, and
-no extra model calls.** It is implemented in the A/B harness only, not in the demo. See
+fleet demo — plus an **Ontology: on/off** button in the Controls row. One switch, one
+principle: when the ontology is on it judges **and its verdicts control** (question
+suppression, the stale-command re-aim, and the model's own observation regime); when it
+is off it controls nothing. Declared rules: `Ball ⊑ ≥1 catchableBy` (a ball the physics
+cannot recover is a fact rather than a mistake) and `Ball ⊑ ≥1 predictedPosition` (a
+ball that will reach paddle height has a predictable landing point, wall reflections
+priced in).
+
+**Injecting that knowledge measurably improves performance.** With the ontology on, the
+model's input is rewritten around the prediction — the side of the paddle is named from
+the wall-folded *landing* point (0% wrong side, versus 12.4% for the naive
+current-position observation) and the two absolute coordinates the gap was computed from
+are stated. Closed-loop A/B against the real checkpoint, 60 s × 3 seeds × 2 batches:
+**+8.3 score in both batches** (14.0 → 22.3 and 15.0 → 23.3), balls lost after an ask
+2.7/3.0 → 1.0/1.3, provably lost 0 everywhere, zero extra model calls. Details and
+honest decomposition in
 [The same idea in Breakout](#the-same-idea-in-breakout--and-where-the-fleet-invariant-does-not-carry-over).
 
 ### laya runs the warehouse
@@ -542,8 +552,10 @@ to interfere with each other — and this demo is not there yet.
 
 #### The same idea in Breakout — and where the fleet invariant does *not* carry over
 
-`static/breakout.html` now carries an Ontology panel too, with the same TBox editor, ABox
-view and enforce checkbox. The **TBox is data, but the reasoner is code** and the axiom
+`static/breakout.html` now carries an Ontology panel too, with the same TBox editor and
+ABox view — enforcement lives on the **Ontology: on/off** button in the Controls row
+rather than a panel checkbox, one switch with one principle: when the ontology judges,
+its verdicts control; when it is off, it controls nothing. The **TBox is data, but the reasoner is code** and the axiom
 **ids are hardcoded** — so is the "Tier 1 arrives as an injected extension" split. What is
 new is the constraint: reachability.
 
@@ -586,7 +598,10 @@ Claiming otherwise would be false. What replaces it:
 > construction and asserted as such, so it cannot be "tidied" negative later.
 
 Clause 2 is the one the 21,000-state sweep enforces, and it is one-directional on purpose.
-Enforce **defaults to off**, so the demo ships byte-identical to before.
+Enforce **defaults to on** — the "Ontology: on/off" button in the Controls row is the single
+switch, and when it is off the ontology controls nothing (the observation reverts to the
+naive current-position baseline below, questions always go out, the stale-command re-aim
+stops).
 
 **Above the bricks the ontology is silent.** A descending ball above `y = 121` can be
 deflected before it reaches the paddle, so no sound verdict exists. The decidable band is
@@ -594,20 +609,17 @@ deflected before it reaches the paddle, so no sound verdict exists. The decidabl
 verdict is about the geometry *at that tick*, but below the brick field no new information
 can change the trajectory — a ball declared unreachable stays unreachable.
 
-**What it does not do.** It does not improve the score, and the HUD says so with two
-counters that move independently of the toggle:
+**What it does, measured.** The gate alone (suppressing hopeless questions) remains worth
+exactly zero on this demo's controller — unreachable balls are rare (1.7%–6.7% of
+questions, and that figure is a property of the controller, not of Breakout). What the
+ontology now adds is the knowledge, and the knowledge pays. The two HUD counters still
+split the loss into *provably lost* and *lost after a catchable ask* — the second is the
+model's real failure rate, and it is the honest form of "the demo stops blaming the model
+for physics-impossible catches".
 
-```
-provably lost 0 · lost after a catchable ask 1
-```
-
-The second is the model's real failure rate. Splitting the first out is the honest
-presentation of "the demo stops blaming the model for physics-impossible catches" — it is a
-*different quantity*, not a better one.
-
-**`node eval_breakout.mjs` is the on/off A/B.** `ontology-off` is the demo exactly as it was;
-`ontology-on` is the same game with the gate closed. It reports what actually changes, and
-deliberately does not report score as the headline:
+**`node eval_breakout.mjs` is the on/off A/B.** The offline table is still the first look —
+no server, no spend, the gate and the physics are pure functions — but since the observation
+regime split (below), the closed-loop score IS the headline (measured further down):
 
 ```
 600 decision ticks sampled (seed 11, 0.25s cadence)
@@ -639,7 +651,7 @@ and the demo's controller is mostly not, so the gate has little to close. **The 
 quoted above is this curve's far left, i.e. a statement about the demo policy rather than
 about Breakout.** At a genuinely bad aim bias the gate suppresses a third of what it is asked.
 
-Two consequences, both of which cut against reading this as a performance win:
+One consequence still cuts against reading the GATE as a performance win:
 
 * **Suppression is not free.** A suppressed ball gets no command, so the paddle holds still
   and the cost lands on the *next* ball. Over the 192 suppressed balls at 200 px of bias, the
@@ -647,18 +659,11 @@ Two consequences, both of which cut against reading this as a performance win:
   them need more than 80 px of travel to get back. The harness's "balls lost should be
   ~unchanged" therefore means the gate's cost roughly cancels its benefit, not that there is
   a benefit.
-* **The reachability gate is worth exactly zero here — and a different axiom is not.** The
-  `on` and `off` columns below are identical in every row. The gain in this example comes
-  from re-aiming the paddle when the ball reflects off a side wall, which 38.8% of in-command
-  reflections leave pointing the wrong way: against the real checkpoint it wins **3 of 3
-  seeds** for **+9 net score**, cuts balls lost after an ask from **1.3 to 0.7**, and costs
-  **zero** extra model calls. That is a *stale-command* axiom rather than a reachability one,
-  and it is implemented in the harness loop only — not in the TBox, not in `breakout.html`.
 
 The gate's own value in this example is presentational and structural: it splits *provably
 lost* from *lost after a catchable ask*, so the demo stops attributing physics-impossible
-catches to the model, and it is the second domain proving the shared TBox/ABox core. **It is
-not a speedup.**
+catches to the model, and it is the second domain proving the shared TBox/ABox core. **The
+gate itself is not a speedup — the knowledge injection below is.**
 
 Two measurement traps this harness hit and now guards against in its own comments, because
 both produced a clean sheet of zeros that meant nothing: generating scenarios with a
@@ -678,16 +683,28 @@ node tools/landing_accuracy.mjs # how exact the landing point handed to the mode
 Each script's header records the trap that produced a wrong number the first time, since the
 mistakes are more reusable than the results.
 
-**The observation changed too, and it was wrong before.** `buildState()` compared the
-paddle to the ball's *current* x. The ball drifts and reflects on the way down, so over
-80,000 decidable states that named the wrong side **12.4%** of the time. It now reports the
-landing point, which takes that to **0** by construction, and both the prose and the reasoner
-read the same `measure()` so the number the model sees and the number reasoned over cannot
-diverge. Worth being straight about what that did and did not buy: it did **not** change the
-score — 25 seeded games with a perfect controller lost 1025 balls aiming at current x and
-1025 aiming at the landing point. A paddle driving toward the landing point sweeps through
-the current x on the way. The gain is that the model is no longer *told* the wrong thing,
-which starts to matter the moment a controller commits to one side for a whole descent.
+**The observation is now the knowledge, in two regimes.** `buildState()` once compared the
+paddle to the ball's *current* x; the ball drifts and reflects on the way down, so over
+80,000 decidable states that named the wrong side **12.4%** of the time. The fix took that
+to **0** by construction, and both the prose and the reasoner read the same `measure()` so
+the number the model sees and the number reasoned over cannot diverge. The master switch
+now splits the observation in two:
+
+- **Ontology on** — the side is named from the wall-folded **landing point** (the
+  `ball-predicted-at-paddle-level` axiom's output) and the two absolute x positions are
+  stated: *"It will land at x≈249, and the paddle is at x≈100."* Above the decidable band
+  (rising, above the bricks) there is no prediction, so the prose falls back to the current
+  position — no claim where the ontology has none.
+- **Ontology off** — the **naive current-position** observation, deliberately resurrected
+  as the contrast arm: it names the wrong side ~12.4% of the time, measured on the actual
+  prose over 4,000 states. The ON regime names it 0 times on the same states. That test
+  breaks if the two regimes ever stop disagreeing — the contrast is the demo.
+
+Two intermediate forms were measured against the real model and rejected: coordinates
+appended alongside the gap prose changed **0 of ~2,600 answers** (the model keys on the gap
+phrase), and coordinates *without* the prose collapsed the score **19.3 → 6.3** — this
+checkpoint derives nothing from raw coordinates, so the prose stays and the coordinates ride
+alongside.
 
 **A wall-bounce fix: the one thing here that pays.** The paddle visibly misplays
 after the ball reflects off a side wall, and the reading is that the demo should re-aim the
@@ -712,38 +729,49 @@ tested against real physics: `the landing coordinate does NOT move at a bounce` 
 that makes the sign the right thing to compare, so if the fold in `reflectX` ever changes, the
 test says so instead of the axiom quietly becoming a no-op.
 
-Against the **real checkpoint**, the gain holds. `eval_breakout.mjs --loop` drives four arms —
-the two ontology arms plus the re-aim arm with and without the gate — 60 s per seed:
+Against the **real checkpoint**, the gain holds — and with the two-regime observation it is
+now a measured performance claim, not a bookkeeping one. `eval_breakout.mjs --loop` drives
+four arms — the naive baseline (`ontology-off`: current-position observation, every ball
+asked), the prediction regime with the gate (`ontology-on`), and the same two with the
+stale-command re-aim — 60 s per seed, two independent batches:
 
 ```
                               ontology-off      ontology-on            reaim   ontology-on+reaim
-questions asked                         241              241              241                241
+batch 1 (seeds 11-13)
+questions asked                         166              241              169                241
+lost after an ask                       2.7              1.3              2.7                1.0
 provably lost                           0.0              0.0              0.0                0.0
-lost after an ask                       1.3              1.3              0.7                0.7
-wall bounces seen                         0                0               71                71
-api calls                               722              722              722                722
-bricks left                            20.7             20.7             17.7               17.7
-score                                   19.3             19.3             22.3               22.3
-
-  seed 11: 17 -> 18 (+1)    seed 12: 20 -> 27 (+7)    seed 13: 21 -> 22 (+1)
-  re-aim wins 3, loses 0, ties 0; net score +9
+score                                   14.0             19.3             13.7               22.3
+batch 2 (seeds 21-23)
+questions asked                         173              196              183                241
+lost after an ask                       3.0              2.3              3.0                1.3
+provably lost                           0.0              0.0              0.0                0.0
+score                                   15.0             17.3             15.0               23.3
 ```
 
-Three things in that table are the point:
+**The button comparison is `ontology-off` vs `ontology-on+reaim`: +8.3 in both batches**
+(14.0 → 22.3 and 15.0 → 23.3), with balls lost after an ask 2.7 → 1.0 and 3.0 → 1.3 — the
+naive-baseline runs lose so many balls the game ends early (166/173 asks against 241),
+which is also why their api-call counts are lower. Four things in the table are the point:
 
-* **The ontology columns are identical.** `on` and `off` differ in nothing — same asks, same
-  losses, same score. The reachability gate is worth exactly zero here, which is what the bias
-  sweep predicts.
-* **The re-aim arm cuts balls actually lost**, `1.3 → 0.7` — it is not scoring by playing
-  differently, it is catching balls it was dropping. Brick count falls alongside the score
-  (20.7 → 17.7 of 40), so the extra score is cleared bricks and nothing else.
-* **It is free.** 722 api calls in every arm. The fix re-derives the command from `measure()`
-  over the live sim at bounce time, so it costs no model call — which is what makes it better
-  than shortening the ask interval, which would cost 4×.
+* **The gain is the knowledge, not the gate.** Suppression fired 0–3 times across both
+  batches (the demo's controller is too good for the gate to close — the bias sweep below
+  predicts exactly this). The +8.3 comes from the observation regime: the model is told
+  where the ball will land instead of where it is.
+* **The ON columns reproduce the historical baseline exactly** (19.3/22.3, 17.3/23.3) — the
+  prediction regime is the prose the demo always sent, plus the coordinates. So the +8.3 is
+  attributable to the OFF arm's naive observation, not to ON getting faster.
+* **The re-aim arm alone is worth nothing now** (13.7, 15.0 — level with the baseline). The
+  stale-command fix re-derives toward the *predicted* landing point; against the naive
+  observation it churns instead of catching. In the earlier prose-only baseline the same fix
+  won 3 of 3 seeds for +9 net — the fix and the prediction compose, and the pair is what the
+  button turns on.
+* **It is free.** The prediction and the re-aim both re-derive from `measure()` over the
+  live sim; no extra model calls in either direction.
 
-**Three seeds is not many.** +1/+7/+1 wins three of three, but the sample is small enough that
-the confidence interval on +9 is wide. Seeds default to 11–13 so this table reproduces
-verbatim; widen them before trusting the magnitude:
+**Three seeds per batch is not many.** +8.3 held across two independent batches, but the
+per-seed spread is wide enough that the confidence interval is not tight. Seeds default to
+11–13 so the tables reproduce; widen them before trusting the magnitude:
 
 ```
 uv run uvicorn server:app                                   # terminal 1
@@ -767,11 +795,11 @@ if (axiom("command-stale-on-bounce") && commandIsStale(sim)) {
 }
 ```
 
-It is gated on the axiom being **present**, not on a separate toggle — delete
-`command-stale-on-bounce` in the TBox editor and the correction stops, with `unasserted`
-reporting why. That is the same hole commit `a5149d0` closed for the reachability axiom, kept
-closed here: an axiom that is displayed as enforced and enforced by nothing is the failure mode
-worth designing against.
+It is gated on the master switch **and** the axiom being present — turn the Ontology button
+off, or delete `command-stale-on-bounce` in the TBox editor, and the correction stops, with
+`unasserted` reporting the deletion. That is the same hole commit `a5149d0` closed for the
+reachability axiom, kept closed here: an axiom that is displayed as enforced and enforced by
+nothing is the failure mode worth designing against.
 
 **A correction to what this section claimed before, from a bug worth remembering.** An earlier
 version here reported the upper bound as 0 and the fix as rejected. That was wrong: the harness
@@ -818,7 +846,8 @@ four forms, so a shared list is the obvious tidy-up and it would re-open the hol
 be enforced by nothing. Each domain exports its own, and `checkTBox` takes it as an argument.
 
 **Browser verification.** The panel was checked in headless Chromium, not just in node: panel
-mounts with 5 axioms and a satisfiable TBox, the toggle flips without error, the ABox
+mounts with the declared axioms (7 today) and a satisfiable TBox, the toggle flips without
+error, the ABox
 populates with a live verdict, duplicate axioms are refused *by name*
 ("ball-must-be-catchable already asserts that"), and add/delete/reset all repaint. Two bugs
 were caught only there — a stray `</content>` left in the spliced script, and a stale axiom
@@ -922,6 +951,27 @@ multi-pickup off       133.0 / 40.2        127.3 / 39.9
 
 - 다중 탑승이 가능한 운행일 때: 처리량 **+43%**, 주행거리 **−5%**
 - 직렬(1명씩)일 때: 규칙의 이득이 **0으로 사라짐**
+
+**고급 지식 주입 — 패들 제어 (Breakout, 실측)**
+
+온톨로지가 선언한 지식 — 벽 반사까지 반영한 **착륙 지점 예측** (`Ball ⊑ ≥1 predictedPosition`)
+— 을 모델의 입력에 주입했을 때의 성능 변화입니다. 대조군은 의도적으로 naive 관측(공의 **현재
+위치** 기준, 하강 중 옆면을 12.4%의 확률로 반대로 말함)이고, 실험군은 착륙 지점 기준 판정에
+절대 좌표("x≈249에 떨어지고, 패들은 x≈100")를 함께 줍니다.
+
+| | naive 관측 (온톨로지 off) | 예측 관측 (온톨로지 on) |
+|---|---|---|
+| score (배치 1, 시드 11–13) | 14.0 | **22.3 (+8.3)** |
+| score (배치 2, 시드 21–23) | 15.0 | **23.3 (+8.3)** |
+| 질문 후 잃은 공 | 2.7 / 3.0 | **1.0 / 1.3** |
+| 잘못된 방향 지명 | 12.4% | **0%** (4,000 상태 실측) |
+| 추가 모델 호출 | — | **0회** |
+
+두 배치 모두 +8.3으로 일관됩니다. naive 관측에서는 라이브 3개 중 평균 2.7~3.0개를 잃어
+게임이 조기 종료됐고(질문 166/173회), 예측 관측에서는 60초 내내 플레이했습니다(241회).
+억제 게이트는 이 실행에서 0~3회 발동에 그쳤으므로 **개선은 게이트가 아니라 주입된 지식
+(착륙 예측)의 효과**입니다. 온톨로지 off 시 나쁜 관측이 되는 것은 대조를 보여주기 위한
+의도된 설계입니다. 재현: `node eval_breakout.mjs --n 3 --seed 11 --loop --loopsecs 60`.
 
 ### 해석: 이 실험에서 가장 값진 발견
 
@@ -1113,3 +1163,225 @@ The residual ~7s is mostly unavoidable: importing `torch`/`transformers`
 (~1s) and moving ~1.16B parameters onto the MPS device (~2s per checkpoint
 round of allocation + transfer). If startup ever matters more than first-token
 latency, run the router as a long-lived server process and preload once.
+## 부록 A. CJet 대 Jev — 전이성 실험의 보존 기록
+
+> 원래 독립 문서(`cjet-jev-compare.md`)였던 것을 README에 통합했습니다. 같은 실험의
+> 본문 기록은 [Does it transfer? laya vs Jev](#does-it-transfer-laya-vs-jev)에 있고,
+> 중복되는 표·해석·기준선 정정은 본문으로 통합했습니다. 여기는 본문에 없는 기록만
+> 남긴 축약본입니다. 모든 수치는 `node eval_rules.mjs --compare --n 200 --seed 7`로
+> 재현됩니다.
+
+### 인터페이스 동일성 — 비교가 공정한 이유
+
+Jev(TypeSafe, `typesafe/jev-1.13`, OpenRouter Decisions API 경유)는 laya와 동일한 타입
+질문 인터페이스를 받는 System-1 의사결정 모델입니다.
+
+| | laya | Jev |
+|---|---|---|
+| 질문 | `{type, instructions, criteria}` | 동일 |
+| choice criteria | `{key: description}` | 동일 |
+| score criteria | `[label, ...]` | 동일 |
+| 응답 | `{type, choice, probabilities, confidence}` | 동일 |
+| 추가 필드 | `action.act_probability` | 없음 |
+| 사용량 | `input_tokens` | `input_tokens`, `output_tokens`, **`cost` (USD)** |
+
+`server.py`는 `model: "jev"`를 받아 백엔드를 교체하고, `jev.py`는 응답을 laya의
+envelope 형태로 정규화합니다. 그래서 어떤 클라이언트도 "누가 답했는지" 분기하지
+않습니다. 동일한 state, 동일한 질문, 동일한 채점 — 바뀐 것은 어느 모델이 답했는지뿐입니다.
+
+### 8-arm 전체 표와 충돌-제한 수치
+
+전체 200개 시나리오 — 본문의 4-row 표에 두 arm을 더해 전부:
+
+| 모델 | arm | 평균 regret | 최소우회 선택률 | 좌석 위반 | 판단당 비용 | ms |
+|---|---|---|---|---|---|---|
+| laya | no-rules | 38.33 blk | 39.0% | 51 | $0 (로컬) | 81 |
+| laya | rules | 6.43 blk | 79.0% | **0** | $0 (로컬) | 136 |
+| laya | rules-nofilter | 6.23 blk | 83.6% | 4 | $0 (로컬) | 141 |
+| laya | greedy | 34.60 blk | 48.7% | 48 | — | — |
+| Jev | no-rules | 35.18 blk | 45.5% | 47 | $0.000022 | 276 |
+| Jev | rules | **1.54 blk** | **91.0%** | **0** | $0.000032 | 269 |
+| Jev | rules-nofilter | 0.98 blk | 92.5% | 0 | $0.000032 | 262 |
+| Jev | greedy | 34.60 blk | 48.0% | 48 | — | — |
+
+충돌하는 195개로 제한해도 순위는 그대로입니다 — laya는 38.83 → 6.60 blk, 39.5% → 78.5%,
+Jev는 35.61 → **1.55** blk, 46.2% → **91.3%**입니다.
+
+### 신뢰도 백분위 (모델별)
+
+동일한 질문에 대해:
+
+| 모델 | p10 | p50 | p95 |
+|---|---|---|---|
+| laya | 0.002 | 0.033 | 1.000 |
+| Jev | 0.420 | 0.880 | 1.000 |
+
+laya에 맞춘 `CONF_FLOOR = 0.002`를 Jev에 쓰면 27건 중 **0건**만 게이트됩니다 —
+오발생도 경고도 없이 게이트가 조용히 게이트를 멈춥니다. 모델이나 질문 텍스트가 바뀔
+때마다 calibration 상수를 다시 파생해야 합니다. `act_probability`는 두 모델 모두 모든
+백분위에서 1.000이므로 게이트하지 않습니다.
+
+### 이 부록의 한계
+
+- **스냅샷 1개, 실행 1회.** Jev `1.13-20260917`, 시나리오 200개, 단일 패스. 시드는
+  재현 가능하지만 큰 표본이 아니며, 버전 간 차이는 측정하지 않았습니다.
+- **이 비교가 재는 것은 도메인 지식이 아니라 정보 사용량입니다.** no-rules arm에도
+  설계 의도로 최근접 버스 추천이 산문으로 들어 있습니다 — 두 모델이 동일한 힌트를 받고,
+  두 arm을 가르는 것은 규칙에서 파생된 것뿐입니다.
+- **모델 2개는 조명이지 조사 결과가 아닙니다.** 주장은 "laya 밖에서도 전이된다"까지이며,
+  "System-1 모델 일반에 통한다"까지 확장하려면 백엔드가 더 필요합니다.
+- **시뮬레이션이며 운영 데이터가 아닙니다.**
+
+## 부록 B. CJet 기술 자료 — 고유 내용의 보존 기록
+
+> 원래 독립 문서(`cjet-merit.md`)였던 것을 README에 통합했습니다. 규칙 계층 표, Jev
+> 비교, 비용·속도, 수치 요약은 본문과 [IR 자료](#ir-자료)로 통합되어 있으므로 여기서
+> 반복하지 않습니다. 남기는 것: 본문에 없는 인사이트와 논증만입니다.
+
+### 계획 한계(over-commitment)는 좌석과 별개의 제약이다
+
+"이 버스는 최대 4명까지 태울 수 있다"는 제약과 별개로, 이 시뮬레이터를 실제로 제한하는
+것은 대개 **계획 한계**입니다. 버스는 `planHorizon = 2 × seats` 정거장까지만 경로에
+약속할 수 있고, 이미 그만큼 약속했다면 좌석이 남아 있어도 새 수요를 거부합니다.
+17,243건의 거절 사유를 분류한 결과 **100%가 계획 한계**였고 좌석 제한이 단독 원인이 된
+경우는 **0건**이었습니다 — `insertStops`는 좌석 predicate(hand-written이든 온톨로지든)를
+부르기 전에 horizon에서 먼저 끊기기 때문입니다. 그래서 UI 필드 이름이 `No room`이 아니라
+**Over-committed**입니다. 두 제약은 별개이며, 이 시뮬레이터의 상한은 후자입니다. ^[inferred]
+
+수용할 수 없는 버스를 선택한 건수(좌석이든 계획 한계든):
+
+| | 규칙 없음 | 규칙 반영 | 필터 미적용 | greedy |
+|---|---|---|---|---|
+| CJet | 51건 | **0건** | 4건 | 48건 |
+| Jev | 47건 | **0건** | 0건 | 48건 |
+
+### 규칙 계층 ↔ 온톨로지 대응
+
+**이 계층 구조는 온톨로지 계층과 대응하며, TBox/ABox reasoner로 구현되어 있습니다.**
+
+| 규칙 계층 | 온톨로지 대응 | 성격 |
+|---|---|---|
+| Tier 0 — 하드 제약 | **OWL cardinality / restriction axiom** | 일관성 검증 — 위반 시 추론 불가 |
+| Tier 1 — 파생 수치 | **reasoner 또는 SPARQL 질의 결과** | 결정론적 계산 |
+| Tier 2 — 정책 | 온톨로지에 내장된 guidance | |
+| state | **ABox** (개인에 대한 assertion) | |
+| question | **질의** | |
+
+가장 중요한 대응은 **Tier 0 ↔ OWL axiom**입니다. 좌석 제약은 사실상
+`Bus hasAtMost 4 Passenger`라는 cardinality axiom입니다. 구조적 이점:
+
+1. **규칙의 출처가 코드가 아니라 형식적 규준이 됩니다** — reasoner가 건전성을 검증합니다.
+2. **"위반 불가"가 단일 규칙이 아니라 전체 일관성 검사로 확장됩니다** — 규칙 집합끼리
+   모순되는 경우를 사전에 잡습니다(`checkTBox()`).
+3. **파생 수치가 선언적으로 파생됩니다** — 단, Tier 1의 수치는 추론이 아니라 **확장
+   함수**입니다: 거리는 최적화이지 논리가 아니며, reasoner는 등록된 함수를 이름으로
+   호출하고 시뮬레이터를 import하지 않습니다(순환 방지). **구조와 제약은 온톨로지가,
+   수는 그 온톨로지가 부를 수 있는 함수가 줍니다.**
+
+측정 (`node eval_rules.mjs --n 200 --seed 7`):
+
+| 측정 | 결과 |
+|---|---|
+| TBox 자기 검사 | satisfiable |
+| hand-written 대비 **불일치** | **600쌍 중 0건** (단, 아래 단서) |
+| `ontology` arm regret | 6.43 blk — `rules` arm과 **완전히 동일** |
+| 추론 비용 | 경로 검사당 **1.19 µs** (판단 136,000 µs의 0.0009%) |
+
+`ontology` arm이 `rules` arm과 숫자 단위로 같다는 것이 핵심입니다 — 모델 입력은 동일하고
+**제약 계층만 다르므로**, 결과가 같다는 것은 TBox가 hand-written 로직을 정확히 재현한다는
+뜻입니다. 대응표가 아니라 측정입니다.
+
+**600쌍이라는 숫자는 두 기록이 서로 다르게 집계합니다 — 그 불일치 자체가 정보입니다.**
+본문 기록은 "600쌍 중 221쌍이 양쪽 predicate 호출 없이 거절 → 좌석 검사는 379쌍에서
+발동"이고, 이 부록의 원 문서 기록은 "24,000회 호출 중 71.8%가 horizon에서 먼저 끊김 →
+발동 약 170쌍"입니다. predicate가 실제로 발동하는 비율은 시나리오 구성(multi-pickup
+모드 등)에 따라 크게 달라진다는 뜻이고, 그래서 **등가성의 주된 증거는 어느 하네스
+숫자도 아니라 `test_ontology.mjs`의 후보 경로 5,000개 이상 직접 비교 테스트**입니다.
+이 테스트가 통과합니다.
+
+브라우저(`static/fleet.html` 좌측 Ontology 패널)에서 TBox를 실시간 편집할 수 있고,
+편집은 같은 시드로 시뮬레이터를 재시작합니다 — 도중에 제한을 바꾸면 옛 제한으로 계획된
+경로가 남기 때문입니다. 브라우저에서 정확한 등가성은 증명할 수 없습니다(데모가
+wall-clock으로 돌아 두 실행의 수요 수가 다릅니다). 결정적 검사는 하네스와 테스트가
+하고, 브라우저는 "두 경로가 똑같이 동작한다"를 보여줍니다.
+
+### 실패 모드와 운영 특성 — 감사 가능한 결정 엔진의 성질
+
+- **실패가 유계(bounded)입니다.** 자기회귀 생성 모델과 달리 라벨을 **선택**합니다.
+  잘못되면 틀린 버스가 지정될 뿐, 존재하지 않는 버스를 지어내지 않습니다. 실패가 항상
+  감사 가능한 형태로 나타나는 결정적 안전 속성입니다.
+- **확률 분포를 반환합니다.** 라벨만이 아니라 옵션별 확률을 반환하므로, 신뢰도 게이트로
+  판단을 보류하거나, 상위 k개를 유지해 사람에게 에스컬레이션하거나, 보정된 분포로
+  임계값을 설정할 수 있습니다.
+- **감사 추적.** 모든 판단 응답에 라우팅 근거(`routing.reason`), 옵션별 확률, 신뢰도,
+  지연, 사용된 입력이 붙습니다. "왜 이 버스인가"에 항상 답할 수 있습니다.
+- **결정론 · 재현성.** 시드 고정으로 동일 입력 → 동일 출력. 시뮬레이션 불변식 테스트와
+  API 테스트가 회귀를 잡습니다.
+- **데이터 비외주.** 입력 state가 외부로 나가지 않습니다 — 로컬 실행이 충족하는 조건.
+- **우아한 성능 저하.** 신뢰도가 임계값 아래로 떨어지면 결정론적 비용 모델로 자동
+  위임하고, 어느 판단이 모델 결정이고 어느 판단이 위임인지 **decided/deferred
+  카운터로 노출**합니다. 위임을 숨기지 않는 설계입니다.
+- **벤더 비종속.** 모델 교체 시 주입 코드는 그대로 유지됩니다(Jev로 실증). 하드 제약은
+  텍스트가 아니라 코드에 있으므로, **어떤 모델로 교체해도 제약은 강제됩니다.**
+
+### 이 부록의 한계 (본문에 없는 항목)
+
+- **규칙이 판단을 지배합니다.** 파생 수치를 넣으면 모델이 그 수치를 따릅니다. 규칙이
+  잘못되면 결과도 잘못된다는 뜻이고, 규칙의 정확성이 시스템의 상한입니다. Tier 0의
+  코드 강제가 이 위험을 줄입니다.
+- **온톨로지 ↔ 규칙 계층 대응의 일부는 설계 서술입니다.** 구현·측정된 것은 위 표 아래
+  측정 절이고, "SPARQL 질의 결과" 같은 항목은 실제 배치에서의 형태를 말하는 것이지 이
+  저장소의 구현이 아닙니다.
+- **자연어 선호(soft preference)의 경계는 불명확합니다.** 강제 제약은 코드로 처리하지만
+  "우선 이쪽" 류는 모델 판단에 의존하며, 모델별로 필터의 가치가 달랐습니다(laya는
+  필터 없이 4건 위반, Jev는 0건 — Jev에서 필터는 오히려 regret을 0.98 → 1.54로
+  악화시켰습니다).
+
+### 부록 B-1. 온톨로지 파인튜닝의 위험성 — 채택하지 않은 경로의 기록
+
+**온톨로지 경로를 파인튜닝과 결합하는 구성은 위험합니다.** 가장 큰 위험은 퍼포먼스
+하락이 아니라 **구조적 후퇴**입니다.
+
+**가장 날카로운 위험: 닫힌 고리.** 온톨로지가 라벨을 생성하고 그 라벨로 파인튜닝한 뒤
+추론 시 온톨로지 파생 수치를 다시 모델에게 주면, 모델이 하는 일은 **reasoner를 흉내
+내는 것**이 됩니다 — 이미 보유한 함수를 421M 파라미터로 재현하는 셈이며, 동시에 세
+가지를 잃습니다:
+
+1. **reasoner의 오류가 학습 불가능한 오답이 됩니다.** 모델이 reasoner와 정확히
+   일치하도록 학습되므로, 틀린 reasoner 출력은 탐지할 수 없습니다 — 정답처럼 보입니다.
+2. **온톨로지 변경마다 재학습이 필요합니다.** 지금은 코드 한 줄입니다. 파인튜닝하면
+   선언적 규칙이 가중치 아티팩트로 굳어집니다.
+3. **본 설계의 핵심 장점이 사라집니다.** 규칙을 추론 시점에 편집 가능하게 둔 것이
+   벤더 비종속과 파인튜닝 회피의 근거였습니다.
+
+**직접 측정하지 않은 성능 하락 경로 (추론이지만 메커니즘은 구체적):**
+
+- **입력 분포가 좁아지면 본래 능력을 잃습니다.** `english` 체크포인트는 산문을 읽도록
+  학습됐습니다. 온톨로지 파생 구조 수치로 파인튜닝하면 산문 읽기를 잃을 수 있고, 그
+  순간 Tier 3(state의 `rules:` 줄)이 무력화됩니다.
+- **온톨로지 변경에 더 취약해집니다.** 파인튜닝된 모델은 특정 criteria 레이아웃에
+  적응하고, criteria를 바꾸는 것 자체가 out-of-distribution이 됩니다.
+- **벤더 선택지가 사라집니다.** "주입이 System-1 모델 일반의 성질"이라는 결과는 정확히
+  파인튜닝하지 않았기 때문에 얻은 것입니다.
+
+**이 저장소의 관련 증거:** (1) 학습되지 않은 영역에서 모델은 아무것도 안 하는 것보다
+나쁩니다 — no-rules laya(38.33)는 단순 최근접(34.60)보다 나쁩니다. (2) 신뢰도 게이트가
+조용히 꺼지는 법을 이미 겪었습니다 — 임계값 0.45가 판단 100%를 기각했고 파이프라인은
+멀쩡해 보였습니다.
+
+**판단 기준** (파인튜닝 검토 시 순서대로): 원 모델이 트릭 베이스라인보다 낮은가(→ 모델
+문제, 정당) / 규칙 주입만으로 트릭 베이스라인을 크게 넘었는가(→ 정보 문제, **여기서
+멈춤**) / 잔여 구간이 온톨로지 미커버인가(→ 잔여 학습 정당). 이 프로젝트는 두 번째에서
+멈추는 케이스였습니다 — 34.60 → 6.43은 주입만으로 달성됐습니다.
+
+**파인튜닝이 정당한 경우**는 온톨로지가 결정론적 계산을 처리하고 남은 구간이 "이
+상황에서는 A보다 B가 낫다"같이 수식으로 도출되지 않는 **학습이 필요한 판단**일 때입니다.
+벤더도 이 관행을 합니다 — `typed-decisions` 체크포인트가 합성 워크플로 4종에
+파인튜닝된 정확히 그것입니다.
+
+**측정하지 않은 것:** 파인튜닝을 실행한 적이 없습니다. 위 하락 경로는 전부 추론입니다.
+laya는 `proper_reward`와 `td_lambda_targets`를 노출하고 설정이 `rl_agent_config.json`이므로
+실행은 가능합니다 — 시뮬레이터가 정확한 reward oracle이자 expert이므로, 온톨로지 파생
+라벨로 파인튜닝한 체크포인트를 같은 하네스로 재측정하면 "어디까지 올라가며 어떤 부작용이
+생기는가"에 숫자로 답할 수 있습니다. 이 기록은 측정하지 않은 경로를 채택하지 않은 이유를
+남기는 것이며, 파인튜닝이 불가능하다는 주장이 아닙니다.

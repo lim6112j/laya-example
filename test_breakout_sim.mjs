@@ -290,9 +290,10 @@ test("the rollout agrees with the game it is supposed to describe", () => {
 
 // ---- what the model is told -----------------------------------------------------
 
-test("the observation reports the landing point, not the current position", () => {
-  // A ball drifting hard left while far from the paddle: its current x is on one side of
-  // the paddle and its landing point on the other. The observation must follow the ball.
+test("the two regimes disagree on this ball — and that disagreement is the demo", () => {
+  // A ball drifting hard left while far from the paddle: its CURRENT x says LEFT, its
+  // landing point says RIGHT. The fixture is pinned so a physics change cannot quietly
+  // make the disagreement vanish — it is the whole thing being demonstrated.
   const sim = fresh();
   sim.paddleX = 72;
   sim.ball = { x: 34, y: 131, vx: -241, vy: 62 };
@@ -303,15 +304,54 @@ test("the observation reports the landing point, not the current position", () =
   assert.notEqual(Math.sign(sim.ball.x - sim.paddleX), Math.sign(m.gap),
     "this fixture is only meaningful while current and landing disagree");
   assert.equal(m.gap, m.landingX - sim.paddleX);
-  assert.match(buildState(sim).situation,
-    m.gap > 0 ? /RIGHT/ : /LEFT/,
-    "the prose must agree with the landing point");
+  assert.match(buildState(sim).situation, /RIGHT/,
+    "ontology ON: the observation follows the LANDING point — right of the paddle");
+  assert.match(buildState(sim).situation, /It will land at x≈197/);
+  sim.config.enforceReachability = false;
+  const off = buildState(sim).situation;
+  assert.match(off, /LEFT/,
+    "ontology OFF: the observation follows the CURRENT position — and says the wrong side");
+  assert.doesNotMatch(off, /It will land at/);
 });
 
-test("the observation names the wrong side 0% of the time, where it used to name it 12.4%", () => {
-  // The regression this whole change exists to prevent. Comparing against the CURRENT x
-  // — what the previous implementation did — is what produced the 12.4%.
-  let wrong = 0, checked = 0;
+test("with the ontology on, the input gains the absolute coordinates the gap came from", () => {
+  // ON: the side is named from the LANDING point (gap = landingX − paddleX, what the
+  // 12.4% fix made it) and the two absolute x positions are appended — coordinates
+  // WITHOUT the prose were measured at a threefold score collapse, so the prose stays.
+  // OFF: the side is named from the ball's CURRENT position — the deliberate naive
+  // baseline, which on this fixture names the opposite side.
+  const sim = fresh({ ball: { x: 200, y: 200, vx: 200, vy: 160 } });
+  assert.equal(decidable(sim.ball), true, "fixture must be a decidable ball");
+  const m = measure(sim);
+  assert.ok(Math.abs(m.gap) > 15 && Math.abs(sim.ball.x - sim.paddleX) > 15,
+    "fixture must name a side in BOTH regimes, or the contrast is invisible");
+  assert.notEqual(Math.sign(sim.ball.x - sim.paddleX), Math.sign(m.gap),
+    "fixture is only meaningful while current and landing disagree");
+  const on = buildState(sim).situation;
+  assert.match(on, /It will land at x≈/);
+  assert.match(on, new RegExp(`x≈${Math.round(m.landingX)}`),
+    "the stated coordinate must be the rollout's landing point");
+  assert.match(on, new RegExp(`paddle is at x≈${Math.round(sim.paddleX)}`),
+    "an absolute landing point without the paddle's own position is not actionable");
+  assert.match(on, /gap \d+ px/, "the gap prose survives — the model keys on it (measured)");
+  assert.match(on, m.gap > 0 ? /RIGHT/ : /LEFT/, "ON names the landing side");
+  sim.config.enforceReachability = false;
+  const off = buildState(sim).situation;
+  assert.match(off, /gap \d+ px/, "switch off: the prose shape survives");
+  assert.doesNotMatch(off, /It will land at/, "switch off: no prediction, no coordinates");
+  assert.match(off, sim.ball.x - sim.paddleX > 0 ? /RIGHT/ : /LEFT/,
+    "OFF names the CURRENT side — the deliberate naive baseline");
+});
+
+test("the ON observation names the wrong side 0% of the time; the OFF baseline 12.4%", () => {
+  // The number this whole feature is priced against. Comparing against the CURRENT x —
+  // what the OFF regime deliberately does again, as the naive baseline — named the wrong
+  // side 12.4% of the time. The ON observation names the landing side and must never err.
+  // Both rates are measured on the ACTUAL prose each regime emits, not on the gap it was
+  // computed from, because the prose is what the model reads.
+  const sideOf = s => /RIGHT of the paddle/.test(s) ? 1
+    : /LEFT of the paddle/.test(s) ? -1 : 0;
+  let wrongOn = 0, wrongOff = 0, checked = 0;
   for (let seed = 1; seed <= 4000; seed++) {
     const sim = createSim({ seed });
     startGame(sim);
@@ -323,14 +363,22 @@ test("the observation names the wrong side 0% of the time, where it used to name
     const truth = Math.sign(landing - sim.paddleX);
     if (truth === 0) continue;              // genuinely centred: no side to name
     checked++;
-    const m = measure(sim);
-    if (Math.sign(m.gap) !== 0 && Math.sign(m.gap) !== truth) wrong++;
-    // And the old way, for the record:
-    const oldGap = sim.ball.x - sim.paddleX;
-    if (Math.sign(oldGap) !== 0 && Math.sign(oldGap) !== truth) wrong += 0;
+    sim.config.enforceReachability = true;
+    const onSide = sideOf(buildState(sim).situation);
+    if (onSide !== 0 && onSide !== truth) wrongOn++;
+    sim.config.enforceReachability = false;
+    const offSide = sideOf(buildState(sim).situation);
+    if (offSide !== 0 && offSide !== truth) wrongOff++;
   }
   assert.ok(checked > 3000, `expected a large sample, got ${checked}`);
-  assert.equal(wrong, 0, `the observation named the wrong side ${wrong} times`);
+  assert.equal(wrongOn, 0,
+    `the ON observation named the wrong side ${wrongOn} times — must be 0`);
+  assert.ok(wrongOff > 0,
+    "the OFF baseline must name a wrong side sometimes, or the contrast is not real");
+  const rate = wrongOff / checked;
+  assert.ok(rate > 0.05 && rate < 0.25,
+    `OFF wrong-side rate ${(100 * rate).toFixed(1)}% — expected ~12.4%; ` +
+    `a big move means the fixture or the regime drifted`);
 });
 
 test("the tolerance is non-negative, because a false 'unreachable' is the costly error", () => {

@@ -184,7 +184,13 @@ export function measure(sim) {
 
 // ---- simulation state ------------------------------------------------------------
 
-export const DEFAULT_CONFIG = { ballSpeed: 160, decideEvery: 0.25 };
+// `enforceReachability` is the ontology's master switch, driven by the "Ontology: on/off"
+// button in breakout.html's Controls row. It gates EVERY behavioural involvement the
+// ontology has — question suppression (`shouldAsk`) AND the stale-command fix in the frame
+// loop — because the principle is one-directional: when the ontology judges, its verdicts
+// control; when it is off, it controls nothing. There is no third state where it judges
+// but does not act.
+export const DEFAULT_CONFIG = { ballSpeed: 160, decideEvery: 0.25, enforceReachability: true };
 
 export function createSim({ seed = 1, config = {} } = {}) {
   const sim = {
@@ -402,20 +408,43 @@ export const QUESTION = {
 export function buildState(sim) {
   const m = measure(sim);
   const { ball } = sim;
-  const side = m.gap > 15
-    ? `clearly to the RIGHT of the paddle (gap ${m.gap.toFixed(0)} px)`
-    : m.gap < -15
-      ? `clearly to the LEFT of the paddle (gap ${Math.abs(m.gap).toFixed(0)} px)`
+  // Two observation regimes, split on the ontology's master switch, and the difference IS
+  // the demo:
+  //
+  // OFF — the NAIVE observation. The side is named from the ball's CURRENT position, the
+  // behaviour before the 12.4% wrong-side fix: a ball drifting left lands right of the
+  // paddle about one ask in eight, and the observation says LEFT all the same. Kept
+  // deliberately as the contrast arm — it is what "no prediction" looks like, and the
+  // closed-loop A/B exists to price the difference.
+  //
+  // ON — the prediction. The side is named from the wall-folded LANDING point (the
+  // `ball-predicted-at-paddle-level` axiom's output — gap = landingX − paddleX, which is
+  // what the fix made it), and the two absolute x positions the gap was computed from are
+  // stated alongside. Coordinates WITHOUT the prose were measured separately and
+  // collapsed the score to a third (19.3 → 6.3): this model derives nothing from raw
+  // coordinates, so the prose stays and the coordinates are appended.
+  const predicted = !!sim.config?.enforceReachability && m.landingX !== null;
+  const sideOf = gap => gap > 15
+    ? `clearly to the RIGHT of the paddle (gap ${gap.toFixed(0)} px)`
+    : gap < -15
+      ? `clearly to the LEFT of the paddle (gap ${Math.abs(gap).toFixed(0)} px)`
       : "almost directly above the paddle";
+  // When no prediction exists the only side there is, is the current one — that part is
+  // not a regime difference, it is the undecidable band saying so.
+  const side = sideOf(predicted ? m.gap : ball.x - sim.paddleX);
   const timeToPaddle = !m.descending
     ? "rising away from the paddle"
     : m.timeToContact === null
       ? "already at paddle level"
       : `about ${m.timeToContact.toFixed(1)} seconds until the paddle can reach it`;
+  const landingLine = predicted
+    ? ` It will land at x≈${Math.round(m.landingX)}, and the paddle is at ` +
+      `x≈${Math.round(sim.paddleX)}.`
+    : "";
   return {
     situation: `The ball is ${side} and moving ${ball.vx > 0 ? "right" : "left"} and ` +
       `${m.descending ? "down, falling toward the paddle" : "up, away from the paddle"}. ` +
-      `${timeToPaddle.charAt(0).toUpperCase() + timeToPaddle.slice(1)}.`,
+      `${timeToPaddle.charAt(0).toUpperCase() + timeToPaddle.slice(1)}.${landingLine}`,
     bricks: `${aliveBricks(sim)} of ${ROWS * COLS} remain; score ${sim.score}, ${sim.lives} lives left`,
   };
 }

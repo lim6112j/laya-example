@@ -247,6 +247,29 @@ trained on — which is the whole reason the injection is doing something.
 optimum is restricted to buses that can take the work, and the naive dispatcher
 picks the closest bus whether or not it has room.
 
+#### ciel_decision_model_v1 — a local dynamic-head backend
+
+`model: "ciel_decision_model_v1"` swaps in a dynamic decision head served over
+HTTP by a local "decision_lab" service (`ciel.py` is the adapter, built the same
+way as `jev.py`). The service answers caller-defined questions about a text state
+in one forward pass — no retraining or restart for new question types — and needs
+no API key and costs nothing.
+
+```sh
+# start the service (separate checkout, needs models/head_dynamic.pt)
+uv run python -m decision_lab ui
+curl -s http://127.0.0.1:8000/api/status      # {"ready":true} before use
+```
+
+The adapter URL is configurable: `DECISION_LAB_URL` defaults to
+`http://127.0.0.1:8000`. Note the **port conflict**: `uv run uvicorn server:app`
+also defaults to 8000, so run one of them elsewhere — e.g.
+`uv run uvicorn server:app --port 8001`. Errors surface as HTTP 502 with the
+upstream body in `detail` (the service reports 503 while loading and 400 when
+`models/head_dynamic.pt` is missing/untrained). State is sent as `"key: value"`
+lines in insertion order; choice options come from the criteria keys, score
+levels from the criteria list.
+
 #### Does it transfer? laya vs Jev
 
 Everything above rests on one model, and the obvious objection is that reading

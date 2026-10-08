@@ -29,8 +29,12 @@ from laya_startup import build_router
 
 import jev
 
+import ciel
+
 QuestionType = Literal["choice", "score", "noul"]
-ModelOverride = Literal["auto", "english", "multilingual", "typed-decisions", "jev"]
+ModelOverride = Literal[
+    "auto", "english", "multilingual", "typed-decisions", "jev", "ciel_decision_model_v1"
+]
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -115,6 +119,28 @@ def predict(request: PredictRequest) -> dict[str, Any]:
             "result": result,
             "latency_ms": latency_ms,
             "routing": {"model": "jev", "repo": jev.JEV_MODEL, "reason": "explicit model=jev"},
+        }
+
+    # Ciel is also a network call to a separate service (the local decision_lab
+    # dynamic head), so it likewise skips predict_lock and never 503s on a cold
+    # laya router — it does not need the router, only the service up.
+    if request.model == "ciel_decision_model_v1":
+        try:
+            result = ciel.predict(_stringify_state(request.state), questions)
+        except ciel.CielError as exc:
+            raise HTTPException(
+                status_code=502 if exc.status else 500,
+                detail=f"ciel failed: {exc}" + (f" — {exc.body[:400]}" if exc.body else ""),
+            ) from exc
+        latency_ms = round((time.perf_counter() - start) * 1000, 1)
+        return {
+            "result": result,
+            "latency_ms": latency_ms,
+            "routing": {
+                "model": "ciel_decision_model_v1",
+                "repo": ciel.SERVICE_NAME,
+                "reason": "explicit model=ciel_decision_model_v1",
+            },
         }
 
     router = _RouterState.router

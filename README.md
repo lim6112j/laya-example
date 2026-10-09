@@ -266,8 +266,13 @@ The adapter URL is configurable: `DECISION_LAB_URL` defaults to
 also defaults to 8000, so run one of them elsewhere — e.g.
 `uv run uvicorn server:app --port 8001`. Errors surface as HTTP 502 with the
 upstream body in `detail` (the service reports 503 while loading and 400 when
-`models/head_dynamic.pt` is missing/untrained). State is sent as `"key: value"`
-lines in insertion order; choice options come from the criteria keys, score
+`models/head_dynamic.pt` is missing/untrained). State is sent as the bare field
+values space-joined into one line, in insertion order — the head was trained on
+prose, and "key: value"-style prefixes or newlines between fields measurably
+flip correct answers to garbage (verified against the live service). This also
+constrains the state prose itself: `breakout_sim.js`'s `buildState` phrases the
+bricks line and the centered case (`offset N px`) the way the training prose
+does, for the same reason. Choice options come from the criteria keys, score
 levels from the criteria list.
 
 #### Does it transfer? laya vs Jev

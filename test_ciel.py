@@ -31,8 +31,10 @@ SCORE_QUESTION = {
 NOUL_QUESTION = {"type": "noul", "instructions": "Is this actionable?"}
 
 
-def test_state_to_custom_text_preserves_order():
-    assert ciel._state_to_custom_text({"b": 2, "a": 1}) == "b: 2\na: 1"
+def test_state_to_custom_text_joins_bare_values_in_order():
+    # No key prefixes, no newlines: both measurably break the head against the
+    # live service (see ciel.py module docstring).
+    assert ciel._state_to_custom_text({"b": 2, "a": 1}) == "2 1"
 
 
 def test_to_lab_questions_maps_each_type():
@@ -164,7 +166,7 @@ def test_predict_round_trip(lab_server):
     assert ciel.health() is True
     result = ciel.predict({"body": "hello"}, {"urgency": SCORE_QUESTION})
     assert _LabHandler.received == {
-        "custom_text": "body: hello",
+        "custom_text": "hello",
         "questions": [{"type": "score", "question": "urgency",
                        "levels": ["low", "medium", "high"]}],
     }

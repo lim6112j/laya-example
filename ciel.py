@@ -10,7 +10,12 @@ same envelope `Agent.system_one()` returns, so the browser and the A/B harness r
 Two differences from jev, both handled here rather than in the callers:
 
 - The service takes a single `custom_text` string, while laya's state is a dict of
-  fields. Flattened here as "key: value" lines, in insertion order.
+  fields. Joined here as the bare values, space-separated, in insertion order —
+  NOT "key: value" lines. The head embeds the state text and scores options
+  against it, and it was trained on prose whose field names live inside the
+  sentences; a "situation:" / "bricks:" prefix is out-of-distribution and
+  measurably flips correct answers to garbage (confirmed against the live
+  service: identical state, prefix-only difference, right → wrong).
 - Upstream answers come back as an array parallel to the request questions, not
   keyed by qid. The positional zip happens here, so the envelope stays keyed.
 
@@ -64,7 +69,12 @@ def health(timeout: float = 5.0) -> bool:
 
 
 def _state_to_custom_text(state: Mapping[str, Any]) -> str:
-    return "\n".join(f"{key}: {value}" for key, value in state.items())
+    """Bare values, space-joined, in insertion order — see module docstring.
+
+    A single line, no separators besides spaces: newlines between fields also
+    measurably break the head, which was trained on single-paragraph prose.
+    """
+    return " ".join(str(value) for value in state.values())
 
 
 def _to_lab_questions(questions: Mapping[str, Dict[str, Any]]) -> tuple[list[Dict[str, Any]], list[str]]:

@@ -428,7 +428,7 @@ export function buildState(sim) {
     ? `clearly to the RIGHT of the paddle (gap ${gap.toFixed(0)} px)`
     : gap < -15
       ? `clearly to the LEFT of the paddle (gap ${Math.abs(gap).toFixed(0)} px)`
-      : "almost directly above the paddle";
+      : `almost directly above the paddle (offset ${Math.abs(gap).toFixed(0)} px)`;
   // When no prediction exists the only side there is, is the current one — that part is
   // not a regime difference, it is the undecidable band saying so.
   const side = sideOf(predicted ? m.gap : ball.x - sim.paddleX);
@@ -445,6 +445,10 @@ export function buildState(sim) {
     situation: `The ball is ${side} and moving ${ball.vx > 0 ? "right" : "left"} and ` +
       `${m.descending ? "down, falling toward the paddle" : "up, away from the paddle"}. ` +
       `${timeToPaddle.charAt(0).toUpperCase() + timeToPaddle.slice(1)}.${landingLine}`,
-    bricks: `${aliveBricks(sim)} of ${ROWS * COLS} remain; score ${sim.score}, ${sim.lives} lives left`,
+    // "Bricks remaining: X. Score: Y. Lives: Z." is the phrasing the ciel head's
+    // training prose uses; the previous "N of M remain; score S, L lives left"
+    // measurably flipped correct paddle directions when combined with the
+    // situation sentence (confirmed against the live decision_lab service).
+    bricks: `Bricks remaining: ${aliveBricks(sim)}. Score: ${sim.score}. Lives: ${sim.lives}.`,
   };
 }

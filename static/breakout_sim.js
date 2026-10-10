@@ -445,10 +445,13 @@ export function buildState(sim) {
     situation: `The ball is ${side} and moving ${ball.vx > 0 ? "right" : "left"} and ` +
       `${m.descending ? "down, falling toward the paddle" : "up, away from the paddle"}. ` +
       `${timeToPaddle.charAt(0).toUpperCase() + timeToPaddle.slice(1)}.${landingLine}`,
-    // "Bricks remaining: X. Score: Y. Lives: Z." is the phrasing the ciel head's
-    // training prose uses; the previous "N of M remain; score S, L lives left"
-    // measurably flipped correct paddle directions when combined with the
-    // situation sentence (confirmed against the live decision_lab service).
+    // "Bricks remaining: X. Score: Y. Lives: Z." matches the ciel head's
+    // training prose phrasing. (An earlier claim that the "N of M remain;
+    // score S, L lives left" variant flipped correct paddle directions no
+    // longer reproduces on the v3 head — both phrasings answer left @ 0.9998
+    // with identical latents. The field-name-prefix hazard in ciel.py's
+    // docstring is real and does reproduce; this one was a stale-cache-era
+    // artifact.)
     bricks: `Bricks remaining: ${aliveBricks(sim)}. Score: ${sim.score}. Lives: ${sim.lives}.`,
   };
 }

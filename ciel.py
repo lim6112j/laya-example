@@ -71,8 +71,11 @@ def health(timeout: float = 5.0) -> bool:
 def _state_to_custom_text(state: Mapping[str, Any]) -> str:
     """Bare values, space-joined, in insertion order — see module docstring.
 
-    A single line, no separators besides spaces: newlines between fields also
-    measurably break the head, which was trained on single-paragraph prose.
+    Newlines between fields are harmless (verified against the live v3 head:
+    left @ 0.9975 vs single-line left @ 0.9997), but the join stays
+    space-only: a "situation:" / "bricks:" field-name prefix measurably
+    flips correct answers to their opposites (left @ 0.9997 → right @ 0.988
+    with the prefix, same latents, gold=left).
     """
     return " ".join(str(value) for value in state.values())
 

@@ -87,6 +87,8 @@
   .meter .low { background: var(--ok); }
   .meter .high { background: var(--danger); }
   .meta { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .answer-warning { color: #92400e; background: #fffbeb; border: 1px solid #fde68a;
+    border-radius: 6px; padding: 6px 8px; margin-top: 6px; font-size: 12px; }
   .routing { color: var(--muted); font-size: 13px; }
   .routing strong { color: var(--text); }
   .banner { border-radius: 8px; padding: 10px 12px; margin-bottom: 12px;
@@ -749,7 +751,38 @@ function answerCard(qid, answer) {
     metaParts.push(`answer_confidence ${answer.answer_confidence}`);
   }
   card.appendChild(el("div", { class: "meta", text: metaParts.join(" · ") }));
+
+  const probs = probabilities(answer);
+  if (isNearUniform(probs)) {
+    card.appendChild(el("div", { class: "answer-warning",
+      text: "near-uniform — no real decision signal; the state text or the "
+        + "options likely fall outside what this head was trained on" }));
+  }
   return card;
+}
+
+// All probability mass for an answer, whichever shape the backend used:
+// choice → probabilities keyed by label; score → keyed by level index;
+// noul → the single p(true).
+function probabilities(answer) {
+  if (answer.type === "choice" || answer.type === "score") {
+    return Object.values(answer.probabilities || {});
+  }
+  if (answer.type === "noul" && answer.noul !== undefined) {
+    return [answer.noul, 1 - answer.noul];
+  }
+  return [];
+}
+
+// A distribution whose top probability barely clears uniform carries no
+// decision — the head fell back to mush (unseen state shape or out-of-domain
+// options). Flag it so mush is never presented as an answer. Cutoff is
+// halfway between uniform (1/n) and certain (1).
+function isNearUniform(probs) {
+  const n = probs.length;
+  if (n < 2) return false;
+  const top = Math.max(...probs);
+  return top < 1 / n + 0.5 * (1 - 1 / n);
 }
 
 function renderResult(body) {
